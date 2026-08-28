@@ -458,12 +458,31 @@ const insetOf = (id) => INSET_OF.get(id) ?? "main";
 const conusFeatures = counties.filter(
   (f) => !isForeignUnit(f.id) && insetOf(f.id) === "main"
 );
-const PROJ = {
-  main: d3
-    .geoOrthographic()
-    .rotate([96, -45])
-    .fitSize([975, 610], { type: "FeatureCollection", features: conusFeatures }),
-};
+// Which way the globe faces. This used to be a literal buried in the
+// projection; it is a runtime parameter now, so nothing downstream — layers,
+// masks, labels, hover, carving — is hardwired to North America. Turning the
+// globe re-bakes the projected geometry (see bakeMain) and every one of those
+// keeps working unchanged, which is what adding Europe or Asia later needs.
+const HOME_ROTATION = [96, -45];
+let viewRotation = [...HOME_ROTATION];
+
+// The fit runs ONCE, at the home rotation, so the lower 48 fill the 975x610
+// design box exactly as they always have. Scale and translate are frozen from
+// it and never recomputed: turning the globe has to spin it under the viewer,
+// and re-fitting per rotation would instead re-frame whatever swung into
+// view, so the sphere would breathe as it turned. Translate is where the
+// sub-viewer point lands on screen, so holding it fixed is precisely what
+// pins the globe's center.
+const HOME_FIT = d3
+  .geoOrthographic()
+  .rotate(HOME_ROTATION)
+  .fitSize([975, 610], { type: "FeatureCollection", features: conusFeatures });
+const GLOBE_SCALE = HOME_FIT.scale();
+const GLOBE_TRANSLATE = HOME_FIT.translate();
+const mainProjection = (rotate) =>
+  d3.geoOrthographic().rotate(rotate).scale(GLOBE_SCALE).translate(GLOBE_TRANSLATE);
+
+const PROJ = { main: HOME_FIT };
 
 const makeTracer = (projection) => {
   const recorded = [];
@@ -533,11 +552,57 @@ function projectParts(geometry, props, region = "main") {
 const closedRings = (parts) =>
   parts.flatMap((p) => p.rings.map((r) => ({ region: p.region, path: [...r, r[0]] })));
 
-// Globe copies of every unit; the AK/HI inset duplicates are appended below
-// once the home view (which the inset boxes are placed against) exists.
-const countyParts = counties.flatMap((f) =>
-  projectParts(f.geometry, { fips: f.id, region: "main" })
-);
+// Every array the layers read. Each holds the globe copies (region "main",
+// re-baked whenever the globe turns) followed by the AK/HI inset duplicates
+// (fitted to fixed boxes, so baked once and simply re-appended). One array
+// per kind rather than one per region because the two layer stacks filter by
+// region anyway — only the order WITHIN a region decides what draws over
+// what, and every bake preserves that order.
+// They are mutated in place, never reassigned: long-lived captures hold them
+// (the labeler was handed mainCountyParts at construction, and rebuildWorld's
+// BASE_ snapshots are taken from them), and a fresh array would strand those.
+const countyParts = [];
+const nationParts = [];
+const lakeParts = { under: [], over: [] };
+const lakeEdges = { under: [], over: [] };
+const coastPaths = [];
+const shorePaths = [];
+const borderPaths = [];
+const edgeBandPaths = [];
+const arcPaths = [];
+const apronParts = [];
+// Globe furniture, drawn only in globe mode (see globeMode): the ocean disc
+// and the graticule. The disc is analytic and rotation-independent — an
+// orthographic sphere always projects to a circle of radius `scale` about
+// `translate`, and both are frozen — so it is built once. The graticule is
+// re-baked with everything else, since its lines do move with the facing.
+const SPHERE_DISC = {
+  region: "main",
+  rings: [
+    d3.range(512).map((i) => {
+      const a = (i / 512) * 2 * Math.PI;
+      return [
+        GLOBE_TRANSLATE[0] + GLOBE_SCALE * Math.cos(a),
+        GLOBE_TRANSLATE[1] + GLOBE_SCALE * Math.sin(a),
+      ];
+    }),
+  ],
+};
+const GRATICULE = d3.geoGraticule10();
+const graticulePaths = [];
+
+// What the inset bake produced, kept aside so a main re-bake can put it back
+// without re-projecting the boxes (their projections never move).
+const INSET_BAKE = {
+  countyParts: [],
+  lakesUnder: [],
+  lakesOver: [],
+  coastPaths: [],
+  shorePaths: [],
+  borderPaths: [],
+  arcPaths: [],
+  apronParts: [],
+};
 
 // ----------------------------------------------------- home view and insets
 
@@ -546,17 +611,26 @@ const countyParts = counties.flatMap((f) =>
 // it is context to pan into (or see whole by zooming out below 1).
 const HOME_TRANSFORM = d3.zoomIdentity;
 
-// The full extent of the projected map (all globe copies), for the zoom's
-// lower bound and the label raster's coverage.
+// The extent of the projected globe copies, for the zoom's lower bound and
+// the label raster's coverage. Recomputed after every bake: turning the globe
+// swings different land into view, and both consumers need the new extent.
+// It stays tight around the land rather than covering the whole projected
+// sphere, because the label raster allocates one cell per map unit over these
+// bounds — a full-disc raster would be several times the cells for ocean.
 const MAP_BOUNDS = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
-for (const p of countyParts) {
-  for (const ring of p.rings)
-    for (const [x, y] of ring) {
-      if (x < MAP_BOUNDS.x0) MAP_BOUNDS.x0 = x;
-      if (x > MAP_BOUNDS.x1) MAP_BOUNDS.x1 = x;
-      if (y < MAP_BOUNDS.y0) MAP_BOUNDS.y0 = y;
-      if (y > MAP_BOUNDS.y1) MAP_BOUNDS.y1 = y;
-    }
+function computeMapBounds() {
+  MAP_BOUNDS.x0 = MAP_BOUNDS.y0 = Infinity;
+  MAP_BOUNDS.x1 = MAP_BOUNDS.y1 = -Infinity;
+  for (const p of countyParts) {
+    if (p.region !== "main") continue;
+    for (const ring of p.rings)
+      for (const [x, y] of ring) {
+        if (x < MAP_BOUNDS.x0) MAP_BOUNDS.x0 = x;
+        if (x > MAP_BOUNDS.x1) MAP_BOUNDS.x1 = x;
+        if (y < MAP_BOUNDS.y0) MAP_BOUNDS.y0 = y;
+        if (y > MAP_BOUNDS.y1) MAP_BOUNDS.y1 = y;
+      }
+  }
 }
 
 // The inset boxes are UI, not map: they render on their own canvas with a
@@ -634,27 +708,13 @@ INSETS.hi = inset(INSETS.ak.x + INSETS.ak.w + INSET_GAP, 195, 120, "Hawaii");
   PROJ.hi.clipExtent(box(INSETS.hi));
   tracers.ak = makeTracer(PROJ.ak);
   tracers.hi = makeTracer(PROJ.hi);
-  // Foreign land the boxes frame (Yukon and British Columbia beside Alaska):
-  // every foreign unit is run through each inset projection and whatever
-  // survives its clip extent is kept, so a box shows the same faded
-  // neighbors the globe does instead of bare sea beyond the border. Foreign
-  // parts go first, like the globe copies (the source data leads with them),
-  // so the Census county shapes paint over any overlap along the seam.
-  for (const region of ["ak", "hi"]) {
-    for (const f of counties) {
-      if (isForeignUnit(f.id))
-        countyParts.push(...projectParts(f.geometry, { fips: f.id, region }, region));
-    }
-  }
-  for (const f of counties) {
-    const region = insetOf(f.id);
-    if (region !== "main")
-      countyParts.push(...projectParts(f.geometry, { fips: f.id, region }, region));
-  }
 }
 
-const partsByFips = d3.group(countyParts, (p) => p.fips);
-const mainCountyParts = countyParts.filter((p) => p.region === "main");
+// Grouped and filtered views of countyParts. Both are mutated in place by
+// assembleBake (and by rebuildWorld when a county is carved), never
+// reassigned — the labeler holds mainCountyParts from construction on.
+const partsByFips = new Map();
+const mainCountyParts = [];
 
 // Area-weighted centroid of each county in map coordinates (globe copies
 // only), for placing the data view's scaled symbols.
@@ -677,87 +737,72 @@ function computeCountyGeo() {
     if (area) countyGeo.set(fips, { x: x / area, y: y / area, area });
   }
 }
-computeCountyGeo();
+// ------------------------------------------------------------------- baking
+//
+// Everything below turns lon/lat source geometry into the projected plane the
+// layers draw. It is split three ways so that turning the globe costs only
+// the part that actually depends on the facing:
+//
+//   - the lon/lat FACTS (arc topology, apron rings, the merged land shape)
+//     are computed once here: they describe the data, not the projection;
+//   - bakeMain() re-projects those facts through the current rotation;
+//   - bakeInsets() does the same through the two fixed inset projections,
+//     once, because those boxes never move.
+//
+// assembleBake() then concatenates the two into the shared arrays and
+// refreshes everything derived from them.
+
 // The land shape: the white backing under the fills and the mask that clips
 // the seam aprons to land. Globe only — each inset gets a plain white box as
 // its backing instead.
-const nationParts = projectParts(merge(topo, topo.objects.counties.geometries), {
-  region: "main",
-});
-const lakeParts = { under: [], over: [] };
-for (const f of overlays.lakes.features) {
-  const key = f.properties.onland ? "over" : "under";
-  lakeParts[key].push(...projectParts(f.geometry, { region: "main" }));
-  // The boxes frame foreign land, and that land's carved lakes with it: the
-  // Alaska box's top corner holds a slice of the Northwest Territories with
-  // part of Great Bear Lake. Every lake is offered to each inset projection
-  // and the clip extent keeps whatever falls inside the box, so a carved
-  // hole there shows lake blue instead of the backing's white.
-  for (const region of ["ak", "hi"]) {
-    lakeParts[key].push(...projectParts(f.geometry, { region }, region));
-  }
-}
-const lakeEdges = {
-  under: closedRings(lakeParts.under),
-  over: closedRings(lakeParts.over),
-};
+const NATION_GEOMETRY = merge(topo, topo.objects.counties.geometries);
 
-// The map's outer boundary as classified runs, each tagged with the region
-// (main/ak/hi) of the unit that owns it. Every run gets a globe copy; runs
-// owned by Alaska or Hawaii are duplicated into their inset as well.
-const projectRuns = (cls) =>
-  overlays.boundary
-    .filter((r) => r.cls === cls)
-    .flatMap((r) => {
-      const geometry = { type: "LineString", coordinates: r.line };
-      const out = projectLines(geometry, "main").map((path) => ({
-        path,
-        region: "main",
-        unit: r.unit,
-      }));
-      if (r.region !== "main") {
-        out.push(
-          ...projectLines(geometry, r.region).map((path) => ({
-            path,
-            region: r.region,
-            unit: r.unit,
-          }))
-        );
-      } else {
-        // Foreign-owned runs are tagged "main" too, so every main run is
-        // offered to each inset and the clip extent decides: only the coasts
-        // beside a box's own land (BC's shore by the panhandle) survive.
-        for (const region of ["ak", "hi"]) {
-          for (const path of projectLines(geometry, region)) {
-            if (path.length >= 2) out.push({ path, region, unit: r.unit });
-          }
-        }
-      }
-      return out;
-    });
-const coastPaths = projectRuns("coast");
-// Great Lakes shorelines share the coast's blue line but not its halo — the
-// lake fill already reads as water, so a halo would just ring it in an off
-// shade.
-const shorePaths = [...coastPaths, ...projectRuns("lakeshore")];
-// Land borders with territory beyond the map's units (Panama–Colombia): a
-// fixed dark line.
-const borderPaths = projectRuns("border");
-// The map-edge entries of the border-band mask: every classified boundary
-// run — coast, lakeshore, and the fixed dark border — wears the band while
-// the unit that owns it is in the union. Classified runs, not whole
-// boundary arcs, because one arc can carry both the international seam and
-// a coastline (San Diego, the North Slope, Maine's Bay of Fundy shore,
-// Minnesota's Superior shore): the assignment-aware seam segments below
-// cover the seam stretch, and these runs cover the rest, so neither part
-// goes bandless.
-const edgeBandPaths = [...shorePaths, ...borderPaths].map((r) => ({
-  a: r.unit,
-  b: r.unit,
-  edge: true,
-  region: r.region,
-  path: r.path,
-}));
+// A coarse copy of that land shape, for the frames of a spin. A full bake is
+// ~130 ms — fine for the one settle at the end of a drag, hopeless at 60 fps —
+// and the cost is dominated by per-geometry stream overhead across thousands
+// of counties and arcs, so thinning the full map does not help. One already
+// merged outline, thinned, is few enough geometries and few enough points to
+// re-project per frame. Rings are never cut below four points, so an island
+// cannot collapse to a degenerate sliver mid-drag.
+const SPIN_LAND = (() => {
+  // Two cuts, and the second is the one that pays. Thinning alone barely
+  // helps: most of the merged outline's rings are already short — every lake
+  // islet and offshore rock the source draws — so a stride hits its
+  // don't-collapse floor on thousands of them and the point count hardly
+  // moves. Dropping those rings outright is what makes the preview cheap, and
+  // a speck below a quarter degree is invisible at any zoom a spin happens at.
+  const STEP = 8;
+  const MIN_DEG = 0.25;
+  const spans = (ring) => {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const [x, y] of ring) {
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+    }
+    return Math.max(x1 - x0, y1 - y0) >= MIN_DEG;
+  };
+  const thin = (ring) => {
+    if (ring.length <= STEP + 2) return ring;
+    const out = [];
+    for (let i = 0; i < ring.length; i += STEP) out.push(ring[i]);
+    if (out[out.length - 1] !== ring[ring.length - 1]) out.push(ring[ring.length - 1]);
+    return out.length >= 4 ? out : ring;
+  };
+  const polys =
+    NATION_GEOMETRY.type === "Polygon"
+      ? [NATION_GEOMETRY.coordinates]
+      : NATION_GEOMETRY.coordinates;
+  const kept = [];
+  for (const rings of polys) {
+    // The outer ring decides whether the polygon appears at all; holes are
+    // judged on their own, so a big lake stays a hole and a pond does not.
+    if (!spans(rings[0])) continue;
+    kept.push([rings[0], ...rings.slice(1).filter(spans)].map(thin));
+  }
+  return { type: "MultiPolygon", coordinates: kept };
+})();
 
 // One record per shared boundary segment, carrying the counties on either
 // side. The hairline/state-border layer and the band mask draw from this
@@ -765,7 +810,7 @@ const edgeBandPaths = [...shorePaths, ...borderPaths].map((r) => ({
 // filter value), so painting a county never re-projects the borders. The
 // selection outline draws a small cached subset of the list instead (see
 // selectedEdges).
-const arcPaths = [];
+const ARC_RECORDS = [];
 {
   const sides = [];
   for (const g of topo.objects.counties.geometries) {
@@ -784,50 +829,13 @@ const arcPaths = [];
     // county uses pairs with itself — which is how the nation's edge is told
     // apart from an interior border. Same pairing here.
     const s = sides[i];
-    const a = s[0];
-    const b = s[s.length - 1];
-    const geometry = { type: "LineString", coordinates: lines[k] };
-    for (const path of projectLines(geometry, "main")) {
-      if (path.length >= 2) arcPaths.push({ a, b, arc: i, region: "main", path });
-    }
-    const inset = insetOf(a);
-    if (inset !== "main") {
-      for (const path of projectLines(geometry, inset)) {
-        if (path.length >= 2) arcPaths.push({ a, b, arc: i, region: inset, path });
-      }
-    } else if (isForeignUnit(a)) {
-      // Foreign arcs (the Yukon–BC line, foreign coastlines) go to whichever
-      // inset's clip catches them, so the hairlines and the border filters
-      // treat that land exactly as the globe does — including the grey line
-      // and band appearing once a unit is painted into the union.
-      for (const region of ["ak", "hi"]) {
-        for (const path of projectLines(geometry, region)) {
-          if (path.length >= 2) arcPaths.push({ a, b, arc: i, region, path });
-        }
-      }
-    }
+    ARC_RECORDS.push({
+      a: s[0],
+      b: s[s.length - 1],
+      arc: i,
+      geometry: { type: "LineString", coordinates: lines[k] },
+    });
   });
-}
-
-// The US–Canada/Mexico seam: the two sides come from different sources and
-// share no arcs, so the build ships the Census side of the border as
-// segments annotated with the county and foreign unit that flank it.
-// Appended here with a/b set to that pair, a seam segment renders and
-// filters exactly like a shared-arc state border — paint Alberta into
-// Montana's state and the line disappears. The classified boundary runs
-// (edgeBandPaths above) leave the seam stretch out, so these segments are
-// the band's only claim there. Alaska's seam segments are also duplicated
-// into its inset, where they draw Alaska's Canada edge.
-for (const s of overlays.seams ?? []) {
-  const geometry = { type: "LineString", coordinates: s.line };
-  for (const path of projectLines(geometry, "main")) {
-    if (path.length >= 2) arcPaths.push({ a: s.c, b: s.f, arc: -1, region: "main", path });
-  }
-  if (insetOf(s.c) === "ak") {
-    for (const path of projectLines(geometry, "ak")) {
-      if (path.length >= 2) arcPaths.push({ a: s.c, b: s.f, arc: -1, region: "ak", path });
-    }
-  }
 }
 
 // Under-fill along the seam: the Natural Earth and Census lines disagree by
@@ -836,7 +844,9 @@ for (const s of overlays.seams ?? []) {
 // mask. Whatever the mismatch leaves uncovered shows the unit's own fill
 // instead of the page background — including after a cross-border merge,
 // when both sides wear the same color and the seam disappears entirely.
-const apronParts = [];
+// The quads are built in lon/lat, so they are a fact about the border, not
+// about the facing, and every bake simply re-projects them.
+const APRON_RINGS = [];
 {
   const APRON_KM = 6;
   const KM_PER_DEG = 111.32;
@@ -866,19 +876,201 @@ const apronParts = [];
         [ax + (-ux * e0 - nx * APRON_KM) / kx, ay + (-uy * e0 - ny * APRON_KM) / KM_PER_DEG],
       ];
       ring.push(ring[0]);
-      apronParts.push(
-        ...projectParts({ type: "Polygon", coordinates: [ring] }, { fips: s.f, region: "main" })
-      );
-      // With the foreign side drawn in the Alaska box, its seam needs the
-      // same under-fill there.
-      const inset = insetOf(s.c);
-      if (inset !== "main")
-        apronParts.push(
-          ...projectParts({ type: "Polygon", coordinates: [ring] }, { fips: s.f, region: inset }, inset)
-        );
+      APRON_RINGS.push({ fips: s.f, inset: insetOf(s.c), geometry: { type: "Polygon", coordinates: [ring] } });
     }
   }
 }
+
+// The map's outer boundary as classified runs, tagged with the region that
+// owns them. Region-parameterized so the globe bake and the inset bake share
+// one definition: the globe takes every run, while a box takes the runs its
+// own land owns plus whatever foreign ("main"-tagged) run its clip extent
+// catches — only the coasts beside the box's own land (BC's shore by the
+// panhandle) survive that.
+const projectRuns = (cls, region) =>
+  overlays.boundary
+    .filter((r) => r.cls === cls)
+    .flatMap((r) => {
+      const geometry = { type: "LineString", coordinates: r.line };
+      if (region === "main" || r.region === region) {
+        return projectLines(geometry, region).map((path) => ({ path, region, unit: r.unit }));
+      }
+      if (r.region !== "main") return [];
+      const out = [];
+      for (const path of projectLines(geometry, region)) {
+        if (path.length >= 2) out.push({ path, region, unit: r.unit });
+      }
+      return out;
+    });
+
+// The map-edge entries of the border-band mask: every classified boundary
+// run — coast, lakeshore, and the fixed dark border — wears the band while
+// the unit that owns it is in the union. Classified runs, not whole
+// boundary arcs, because one arc can carry both the international seam and
+// a coastline (San Diego, the North Slope, Maine's Bay of Fundy shore,
+// Minnesota's Superior shore): the assignment-aware seam segments below
+// cover the seam stretch, and these runs cover the rest, so neither part
+// goes bandless.
+const edgeBandRecords = (runs) =>
+  runs.map((r) => ({ a: r.unit, b: r.unit, edge: true, region: r.region, path: r.path }));
+
+// Re-projects every globe copy through the current rotation. Returns a fresh
+// set of main-region arrays; assembleBake puts them into the shared ones.
+function bakeMain() {
+  const out = {
+    countyParts: counties.flatMap((f) => projectParts(f.geometry, { fips: f.id, region: "main" })),
+    nationParts: projectParts(NATION_GEOMETRY, { region: "main" }),
+    lakesUnder: [],
+    lakesOver: [],
+    arcPaths: [],
+    apronParts: [],
+  };
+  for (const f of overlays.lakes.features) {
+    const key = f.properties.onland ? "lakesOver" : "lakesUnder";
+    out[key].push(...projectParts(f.geometry, { region: "main" }));
+  }
+  const coastPaths = projectRuns("coast", "main");
+  // Great Lakes shorelines share the coast's blue line but not its halo — the
+  // lake fill already reads as water, so a halo would just ring it in an off
+  // shade.
+  out.coastPaths = coastPaths;
+  out.shorePaths = [...coastPaths, ...projectRuns("lakeshore", "main")];
+  // Land borders with territory beyond the map's units (Panama–Colombia): a
+  // fixed dark line.
+  out.borderPaths = projectRuns("border", "main");
+
+  for (const r of ARC_RECORDS) {
+    for (const path of projectLines(r.geometry, "main")) {
+      if (path.length >= 2)
+        out.arcPaths.push({ a: r.a, b: r.b, arc: r.arc, region: "main", path });
+    }
+  }
+  // The US–Canada/Mexico seam: the two sides come from different sources and
+  // share no arcs, so the build ships the Census side of the border as
+  // segments annotated with the county and foreign unit that flank it.
+  // Appended here with a/b set to that pair, a seam segment renders and
+  // filters exactly like a shared-arc state border — paint Alberta into
+  // Montana's state and the line disappears. The classified boundary runs
+  // (the edge records above) leave the seam stretch out, so these segments
+  // are the band's only claim there.
+  for (const s of overlays.seams ?? []) {
+    const geometry = { type: "LineString", coordinates: s.line };
+    for (const path of projectLines(geometry, "main")) {
+      if (path.length >= 2)
+        out.arcPaths.push({ a: s.c, b: s.f, arc: -1, region: "main", path });
+    }
+  }
+  for (const a of APRON_RINGS) {
+    out.apronParts.push(...projectParts(a.geometry, { fips: a.fips, region: "main" }));
+  }
+  out.graticulePaths = projectLines(GRATICULE, "main").map((path) => ({ path, region: "main" }));
+  return out;
+}
+
+// The same, through the two fixed inset projections. Run once: the boxes are
+// pinned UI, so their geometry never depends on which way the globe faces.
+function bakeInsets() {
+  // Foreign land the boxes frame (Yukon and British Columbia beside Alaska):
+  // every foreign unit is run through each inset projection and whatever
+  // survives its clip extent is kept, so a box shows the same faded
+  // neighbors the globe does instead of bare sea beyond the border. Foreign
+  // parts go first, like the globe copies (the source data leads with them),
+  // so the Census county shapes paint over any overlap along the seam.
+  for (const region of ["ak", "hi"]) {
+    for (const f of counties) {
+      if (isForeignUnit(f.id))
+        INSET_BAKE.countyParts.push(...projectParts(f.geometry, { fips: f.id, region }, region));
+    }
+  }
+  for (const f of counties) {
+    const region = insetOf(f.id);
+    if (region !== "main")
+      INSET_BAKE.countyParts.push(...projectParts(f.geometry, { fips: f.id, region }, region));
+  }
+  // The boxes frame foreign land, and that land's carved lakes with it: the
+  // Alaska box's top corner holds a slice of the Northwest Territories with
+  // part of Great Bear Lake. Every lake is offered to each inset projection
+  // and the clip extent keeps whatever falls inside the box, so a carved
+  // hole there shows lake blue instead of the backing's white.
+  for (const f of overlays.lakes.features) {
+    const key = f.properties.onland ? "lakesOver" : "lakesUnder";
+    for (const region of ["ak", "hi"]) {
+      INSET_BAKE[key].push(...projectParts(f.geometry, { region }, region));
+    }
+  }
+  for (const region of ["ak", "hi"]) {
+    const coast = projectRuns("coast", region);
+    INSET_BAKE.coastPaths.push(...coast);
+    INSET_BAKE.shorePaths.push(...coast, ...projectRuns("lakeshore", region));
+    INSET_BAKE.borderPaths.push(...projectRuns("border", region));
+    for (const r of ARC_RECORDS) {
+      // An arc goes to its own unit's box, and a foreign arc (the Yukon–BC
+      // line, foreign coastlines) to whichever box's clip catches it, so the
+      // hairlines and the border filters treat that land exactly as the globe
+      // does — including the grey line and band appearing once a unit is
+      // painted into the union.
+      const own = insetOf(r.a);
+      if (own !== region && !(own === "main" && isForeignUnit(r.a))) continue;
+      for (const path of projectLines(r.geometry, region)) {
+        if (path.length >= 2)
+          INSET_BAKE.arcPaths.push({ a: r.a, b: r.b, arc: r.arc, region, path });
+      }
+    }
+  }
+  // Alaska's seam segments are duplicated into its box, where they draw
+  // Alaska's Canada edge, and its aprons follow for the same reason.
+  for (const s of overlays.seams ?? []) {
+    if (insetOf(s.c) !== "ak") continue;
+    const geometry = { type: "LineString", coordinates: s.line };
+    for (const path of projectLines(geometry, "ak")) {
+      if (path.length >= 2)
+        INSET_BAKE.arcPaths.push({ a: s.c, b: s.f, arc: -1, region: "ak", path });
+    }
+  }
+  for (const a of APRON_RINGS) {
+    if (a.inset === "main") continue;
+    INSET_BAKE.apronParts.push(
+      ...projectParts(a.geometry, { fips: a.fips, region: a.inset }, a.inset)
+    );
+  }
+}
+
+// Puts a fresh main bake and the fixed inset bake into the shared arrays, in
+// place, and refreshes everything read off them.
+function assembleBake(main) {
+  // Element-by-element, not push(...source): these arrays run to tens of
+  // thousands of parts, and a spread passes every one as a call argument.
+  const put = (target, ...sources) => {
+    target.length = 0;
+    for (const s of sources) for (const v of s) target.push(v);
+  };
+  put(countyParts, main.countyParts, INSET_BAKE.countyParts);
+  put(nationParts, main.nationParts);
+  put(lakeParts.under, main.lakesUnder, INSET_BAKE.lakesUnder);
+  put(lakeParts.over, main.lakesOver, INSET_BAKE.lakesOver);
+  put(lakeEdges.under, closedRings(lakeParts.under));
+  put(lakeEdges.over, closedRings(lakeParts.over));
+  put(coastPaths, main.coastPaths, INSET_BAKE.coastPaths);
+  put(shorePaths, main.shorePaths, INSET_BAKE.shorePaths);
+  put(borderPaths, main.borderPaths, INSET_BAKE.borderPaths);
+  put(edgeBandPaths, edgeBandRecords([...shorePaths, ...borderPaths]));
+  put(arcPaths, main.arcPaths, INSET_BAKE.arcPaths);
+  put(apronParts, main.apronParts, INSET_BAKE.apronParts);
+  put(graticulePaths, main.graticulePaths);
+
+  put(mainCountyParts, countyParts.filter((p) => p.region === "main"));
+  partsByFips.clear();
+  for (const p of countyParts) {
+    const list = partsByFips.get(p.fips);
+    if (list) list.push(p);
+    else partsByFips.set(p.fips, [p]);
+  }
+  computeCountyGeo();
+  computeMapBounds();
+}
+
+bakeInsets();
+assembleBake(bakeMain());
 
 // The globe copies are always drawn; the inset duplicates render in a
 // second deck on a canvas above the map, over a white backing (so they
@@ -911,9 +1103,24 @@ let carvePending = []; // click-to-draw knife vertices awaiting their finish
 let knifeDrag = null; // a left press while carving, until it settles as drag or click
 let carving = false; // a finished stroke, GeoJSON import, or preset carve is being applied (tract fetches)
 
-const BASE_COUNTY_PARTS = countyParts.slice();
-const BASE_ARC_PATHS = arcPaths.slice();
-const BASE_EDGE_BAND = edgeBandPaths.slice();
+// The as-baked world, before any carve: what rebuildWorld re-derives from
+// every time carves change. Re-snapshotted after a re-bake, since turning the
+// globe replaces every projected coordinate in them. Adjacency is not in that
+// group — it comes from the topology, which no rotation can change — so
+// BASE_ADJ is taken once.
+const BASE_COUNTY_PARTS = [];
+const BASE_ARC_PATHS = [];
+const BASE_EDGE_BAND = [];
+function snapshotBase() {
+  const put = (target, source) => {
+    target.length = 0;
+    for (const v of source) target.push(v);
+  };
+  put(BASE_COUNTY_PARTS, countyParts);
+  put(BASE_ARC_PATHS, arcPaths);
+  put(BASE_EDGE_BAND, edgeBandPaths);
+}
+snapshotBase();
 const BASE_ADJ = new Map([...countyAdj].map(([k, v]) => [k, v.slice()]));
 
 function rebuildWorld() {
@@ -1077,32 +1284,13 @@ function fringeRibbons(records, pieceParent) {
   return out;
 }
 
-const MAIN = {
-  countyParts: [],
-  arcPaths: [],
-  bandMaskPaths: [],
-  nationParts,
-  coastPaths: coastPaths.filter(isMain),
-  shorePaths: shorePaths.filter(isMain),
-  borderPaths: borderPaths.filter(isMain),
-  apronParts: apronParts.filter(isMain),
-  lakesUnder: lakeParts.under.filter(isMain),
-  lakesOver: lakeParts.over.filter(isMain),
-  lakeEdgesUnder: lakeEdges.under.filter(isMain),
-  lakeEdgesOver: lakeEdges.over.filter(isMain),
-};
-const INSET_ALL = {
-  countyParts: [],
-  arcPaths: [],
-  bandMaskPaths: [],
-  coastPaths: coastPaths.filter((d) => !isMain(d)),
-  shorePaths: shorePaths.filter((d) => !isMain(d)),
-  apronParts: apronParts.filter((d) => !isMain(d)),
-  lakesUnder: lakeParts.under.filter((d) => !isMain(d)),
-  lakesOver: lakeParts.over.filter((d) => !isMain(d)),
-  lakeEdgesUnder: lakeEdges.under.filter((d) => !isMain(d)),
-  lakeEdgesOver: lakeEdges.over.filter((d) => !isMain(d)),
-};
+// The per-deck slices of every shared array. Both objects are filled by
+// rebuildDerived, which hands out FRESH arrays each time: deck.gl re-uploads
+// a layer's buffers when its `data` reference changes, so mutating a shared
+// array in place (which a re-bake does, to keep long-lived captures valid)
+// would otherwise leave the GPU drawing the old geometry.
+const MAIN = {};
+const INSET_ALL = {};
 let V = {};
 function rebuildVisible() {
   const open = (arr) => arr.filter((d) => !insetHidden[d.region]);
@@ -1140,12 +1328,31 @@ function rebuildDerived() {
   // and a split's divider — the outer-boundary arcs, a === b, are covered by
   // the edge runs instead) plus the edge runs themselves.
   const bandMaskPaths = [...arcPaths.filter((d) => d.a !== d.b), ...edgeBandPaths];
+  const notMain = (d) => !isMain(d);
   MAIN.countyParts = mainCountyParts.slice();
   MAIN.arcPaths = arcPaths.filter(isMain);
   MAIN.bandMaskPaths = bandMaskPaths.filter(isMain);
-  INSET_ALL.countyParts = countyParts.filter((d) => !isMain(d));
-  INSET_ALL.arcPaths = arcPaths.filter((d) => !isMain(d));
-  INSET_ALL.bandMaskPaths = bandMaskPaths.filter((d) => !isMain(d));
+  MAIN.nationParts = nationParts.slice();
+  MAIN.coastPaths = coastPaths.filter(isMain);
+  MAIN.shorePaths = shorePaths.filter(isMain);
+  MAIN.borderPaths = borderPaths.filter(isMain);
+  MAIN.apronParts = apronParts.filter(isMain);
+  MAIN.lakesUnder = lakeParts.under.filter(isMain);
+  MAIN.lakesOver = lakeParts.over.filter(isMain);
+  MAIN.lakeEdgesUnder = lakeEdges.under.filter(isMain);
+  MAIN.lakeEdgesOver = lakeEdges.over.filter(isMain);
+  MAIN.graticulePaths = graticulePaths.slice();
+  INSET_ALL.countyParts = countyParts.filter(notMain);
+  INSET_ALL.arcPaths = arcPaths.filter(notMain);
+  INSET_ALL.bandMaskPaths = bandMaskPaths.filter(notMain);
+  INSET_ALL.coastPaths = coastPaths.filter(notMain);
+  INSET_ALL.shorePaths = shorePaths.filter(notMain);
+  INSET_ALL.borderPaths = borderPaths.filter(notMain);
+  INSET_ALL.apronParts = apronParts.filter(notMain);
+  INSET_ALL.lakesUnder = lakeParts.under.filter(notMain);
+  INSET_ALL.lakesOver = lakeParts.over.filter(notMain);
+  INSET_ALL.lakeEdgesUnder = lakeEdges.under.filter(notMain);
+  INSET_ALL.lakeEdgesOver = lakeEdges.over.filter(notMain);
   rebuildVisible();
 }
 rebuildDerived();
@@ -1178,6 +1385,11 @@ const NO_DATA = rgba("#cccccc");
 // recede while the warm hue still says "on the map, not in the union" — and
 // keeps it apart from NO_DATA's grey, which means a state missing data.
 const FOREIGN_LAND = rgba("#f4f0e9");
+// Globe mode only: the sea the sphere shows where no unit covers it, and the
+// graticule over it. Both stay paler than the coast blue so the continent
+// keeps reading as the subject and the sphere as its ground.
+const OCEAN = rgba("#e8f1f7");
+const GRATICULE_LINE = rgba("#b9cfdf", 150);
 
 // The band inside a state's border is the state's own fill pushed deeper: the
 // same hue, more saturated (capped at 1) and darker by the usual multiplier.
@@ -1250,17 +1462,26 @@ const insetGroup = svg.select("#inset-ui");
 // competing Alaska. The raster spans the whole continent (with a margin for
 // leader lines), not just the design box.
 const LABEL_MARGIN = 24;
-const stateLabeler = createStateLabeler({
-  group: stateLabelGroup,
-  name: "main",
-  countyParts: mainCountyParts,
-  bounds: {
-    x0: MAP_BOUNDS.x0 - LABEL_MARGIN,
-    y0: MAP_BOUNDS.y0 - LABEL_MARGIN,
-    x1: MAP_BOUNDS.x1 + LABEL_MARGIN,
-    y1: MAP_BOUNDS.y1 + LABEL_MARGIN,
-  },
-});
+// Rebuilt whenever the globe turns: the labeler sizes its raster (three typed
+// arrays, one cell per map unit) from these bounds at construction, and a new
+// facing swings different land into view, so the old grid neither covers nor
+// fits the new one. The group is emptied first so the retired labeler's
+// <textPath> defs and text go with it.
+function makeMainLabeler() {
+  stateLabelGroup.selectAll("*").remove();
+  return createStateLabeler({
+    group: stateLabelGroup,
+    name: "main",
+    countyParts: mainCountyParts,
+    bounds: {
+      x0: MAP_BOUNDS.x0 - LABEL_MARGIN,
+      y0: MAP_BOUNDS.y0 - LABEL_MARGIN,
+      x1: MAP_BOUNDS.x1 + LABEL_MARGIN,
+      y1: MAP_BOUNDS.y1 + LABEL_MARGIN,
+    },
+  });
+}
+let stateLabeler = makeMainLabeler();
 // Each inset box runs the same label pipeline over its own duplicates
 // (foreign context included, so names keep off Canada), bounded by the box —
 // which also keeps every placement, leader lines included, inside the frame.
@@ -1287,6 +1508,9 @@ let viewHeight = Math.max(1, mapWrap.clientHeight);
 // section, where the projected shapes it derives from live.
 let transform = HOME_TRANSFORM;
 let hoverFips = null;
+// Globe mode: the sphere and graticule draw, and dragging the map turns the
+// globe instead of panning it. Off by default, so the atlas view is untouched.
+let globeMode = false;
 let mapVersion = 0; // bumped whenever fills or borders change
 // The state labels read far fewer inputs than the map does, and their rebuild
 // is the most expensive step of a refresh (a continent-wide raster), so they
@@ -1799,6 +2023,26 @@ function buildLayers() {
   const hoverLayers = [countyHoverLayer(hoverMain)];
 
   const mapLayers = [
+    // Globe furniture, under everything: the ocean disc is the sphere itself,
+    // and the graticule rides on it. Both are off in the atlas view, which
+    // therefore looks exactly as it always did — the globe is a mode, not a
+    // new default.
+    new SolidPolygonLayer({
+      id: "globe-sphere",
+      data: globeMode ? [SPHERE_DISC] : EMPTY,
+      getPolygon: (d) => d.rings,
+      getFillColor: OCEAN,
+      ...FLAT,
+    }),
+    new PathLayer({
+      id: "globe-graticule",
+      data: globeMode ? MAIN.graticulePaths : EMPTY,
+      getPath: (d) => d.path,
+      getColor: GRATICULE_LINE,
+      getWidth: 0.7,
+      widthUnits: "common",
+      ...FLAT,
+    }),
     // Water first: lakes the Census file carves out of the land, then a soft
     // halo along the ocean shoreline (only — a halo over a Great Lake would
     // ring it in an off shade). The lakes get a slight same-color stroke to
@@ -2297,12 +2541,15 @@ insetDeck = new Deck({
 // past its edges even at minimum zoom.
 // Zoom 1 frames the lower 48 (the same scale the US-only map always had, so
 // 16 keeps its meaning as the max); the lower bound is whatever fits the
-// whole continent in the frame.
-const MIN_ZOOM = Math.min(
-  1,
-  975 / (MAP_BOUNDS.x1 - MAP_BOUNDS.x0),
-  610 / (MAP_BOUNDS.y1 - MAP_BOUNDS.y0)
-);
+// land now in view — recomputed after a re-bake, since turning the globe
+// changes what that is.
+const minZoomFor = () =>
+  Math.min(
+    1,
+    975 / (MAP_BOUNDS.x1 - MAP_BOUNDS.x0),
+    610 / (MAP_BOUNDS.y1 - MAP_BOUNDS.y0)
+  );
+let MIN_ZOOM = minZoomFor();
 // While a pan or wheel gesture is in flight, GPU picking pauses: every pick
 // renders the county layer into the picking buffer and then reads pixels
 // back synchronously — a CPU–GPU stall injected exactly when frames are at
@@ -2321,7 +2568,9 @@ const zoom = d3
     if (ev.type === "wheel") return !ev.button;
     // No drag-pan while a drag means something else: painting states, or a
     // carve stroke. Wheel zoom stays live in both.
-    return !paintMode && !carveMode && !ev.button;
+    // No drag-pan while a drag means something else: painting states, a
+    // carve stroke, or turning the globe. Wheel zoom stays live in all three.
+    return !paintMode && !carveMode && !globeMode && !ev.button;
   })
   .on("start.hover", () => {
     gesturing = true;
@@ -2357,6 +2606,108 @@ svg.call(zoom.transform, HOME_TRANSFORM);
 
 // Test hook: drive the view from the same numbers as the reference build.
 window.__setTransform = (k, x, y) => svg.call(zoom.transform, d3.zoomIdentity.translate(x, y).scale(k));
+
+// ----------------------------------------------------------- turning the globe
+
+// Re-face the globe. Everything projected is rebuilt from the same lon/lat
+// sources the load path used, in the same order, so a rotation leaves the map
+// in exactly the state a fresh load at that facing would have produced —
+// including any carves, which are re-projected from the tract topology they
+// were cut from rather than being lost.
+function setRotation(rot) {
+  viewRotation = [rot[0], Math.max(-90, Math.min(90, rot[1]))];
+  PROJ.main = mainProjection(viewRotation);
+  tracers.main = makeTracer(PROJ.main);
+  assembleBake(bakeMain());
+  snapshotBase();
+  rebakeSplits();
+  // Carve hit-testing indexes the as-baked shapes, so it has to go; it
+  // rebuilds itself on the next cut.
+  carveIndex = null;
+  // rebuildWorld re-derives the live arrays from the fresh BASE_ snapshots
+  // and whatever carves stand, and finishes with computeCountyGeo and
+  // rebuildDerived — so it is the right call whether or not anything is
+  // carved.
+  rebuildWorld();
+  stateLabeler = makeMainLabeler();
+  MIN_ZOOM = minZoomFor();
+  applyScaleExtent();
+  scheduleRefresh();
+}
+
+// A drag in globe mode turns the sphere. Design-space pixels convert to
+// degrees through the globe's own radius, so a grab tracks the surface under
+// the cursor at any zoom: one radius of travel is one radian of arc.
+const DEG_PER_UNIT = 180 / Math.PI / GLOBE_SCALE;
+let spinFrom = null; // { x, y, rot } while a spin drag is live
+// A spin is not a d3.zoom gesture, so nothing suppresses the click that
+// follows it; without this a turn of the globe would also clear the selection
+// on release.
+let spinMoved = false;
+
+// The frames of a spin: the sphere, the coarse land silhouette, and the
+// graticule — the only three things cheap enough to re-project per frame.
+// Fills, borders, labels and the insets all sit out the drag and come back
+// with the settle, which is what keeps the turn responsive.
+function spinLayers() {
+  const proj = mainProjection(viewRotation);
+  const trace = makeTracer(proj);
+  const rings = [];
+  for (const ring of trace(SPIN_LAND)) if (ring.length >= 3) rings.push(ring);
+  return [
+    new SolidPolygonLayer({
+      id: "spin-sphere",
+      data: [SPHERE_DISC],
+      getPolygon: (d) => d.rings,
+      getFillColor: OCEAN,
+      ...FLAT,
+    }),
+    new PathLayer({
+      id: "spin-graticule",
+      data: trace(GRATICULE).map((path) => ({ path })),
+      getPath: (d) => d.path,
+      getColor: GRATICULE_LINE,
+      getWidth: 0.7,
+      widthUnits: "common",
+      ...FLAT,
+    }),
+    new SolidPolygonLayer({
+      id: "spin-land",
+      data: rings.map((r) => ({ rings: [r] })),
+      getPolygon: (d) => d.rings,
+      getFillColor: GREY_LAND,
+      ...FLAT,
+    }),
+  ];
+}
+
+function spinTo(rot) {
+  viewRotation = [rot[0], Math.max(-90, Math.min(90, rot[1]))];
+  deck.setProps({ layers: spinLayers() });
+  // The hover tint is drawn in map coordinates against the old facing, so it
+  // would sit over open ocean the moment the globe moves.
+  hoverDeck.setProps({ layers: [] });
+}
+
+// The zoom that frames whatever land the current facing shows, for coming
+// back to the atlas view somewhere other than home. At the home rotation the
+// atlas view is the design box itself, so that case returns the identity
+// transform the map has always used rather than a recomputed near-miss.
+function landFitTransform() {
+  if (viewRotation[0] === HOME_ROTATION[0] && viewRotation[1] === HOME_ROTATION[1]) {
+    return HOME_TRANSFORM;
+  }
+  const w = MAP_BOUNDS.x1 - MAP_BOUNDS.x0;
+  const h = MAP_BOUNDS.y1 - MAP_BOUNDS.y0;
+  if (!(w > 0 && h > 0)) return HOME_TRANSFORM;
+  const k = Math.max(MIN_ZOOM, Math.min(975 / w, 610 / h, 16));
+  return d3.zoomIdentity
+    .translate(
+      975 / 2 - (k * (MAP_BOUNDS.x0 + MAP_BOUNDS.x1)) / 2,
+      610 / 2 - (k * (MAP_BOUNDS.y0 + MAP_BOUNDS.y1)) / 2
+    )
+    .scale(k);
+}
 
 // ------------------------------------------------------------- inset boxes
 
@@ -2434,6 +2785,38 @@ for (const key of ["ak", "hi"]) {
     scheduleRefresh();
   });
 }
+
+// ------------------------------------------------------------- globe mode
+
+// The zoom that frames the whole sphere, with a little air around it. The
+// atlas view's lower bound is "fit the land", which is far tighter than
+// "fit the globe", so globe mode lowers the floor to let the view out.
+const GLOBE_FIT_K = (Math.min(975, 610) * 0.92) / (2 * GLOBE_SCALE);
+const globeHomeTransform = () =>
+  d3.zoomIdentity
+    .translate(975 / 2 - GLOBE_FIT_K * GLOBE_TRANSLATE[0], 610 / 2 - GLOBE_FIT_K * GLOBE_TRANSLATE[1])
+    .scale(GLOBE_FIT_K);
+const applyScaleExtent = () =>
+  zoom.scaleExtent([globeMode ? Math.min(MIN_ZOOM, GLOBE_FIT_K) : MIN_ZOOM, 16]);
+
+function setGlobeMode(on) {
+  globeMode = on;
+  // document.getElementById, not the el() helper: this section runs during
+  // module init, and el is declared further down the file.
+  const btn = document.getElementById("globe");
+  btn.classList.toggle("active", on);
+  btn.setAttribute("aria-pressed", String(on));
+  btn.title = on
+    ? "Back to the atlas view"
+    : "Turn the globe: drag the map to face another part of the world";
+  applyScaleExtent();
+  // Leaving globe mode lands on the land the globe was turned to, not on the
+  // lower 48 — otherwise turning to another continent and stepping out would
+  // drop the view on empty ocean.
+  svg.call(zoom.transform, on ? globeHomeTransform() : landFitTransform());
+  scheduleRefresh();
+}
+document.getElementById("globe").addEventListener("click", () => setGlobeMode(!globeMode));
 
 // Which open inset box, if any, the given CSS-pixel point falls in — the
 // inverse of the inset camera, which at zoom 0 is just a shift.
@@ -2587,6 +2970,17 @@ function applyBrush(fips) {
 }
 
 svg.on("pointerdown", (ev) => {
+  // Globe mode: a left press grabs the sphere. d3.zoom's own drag-pan is
+  // filtered out while globeMode is on, so the two can't fight over the
+  // gesture; the wheel still zooms.
+  if (globeMode && !paintMode && !carveMode && ev.button === 0) {
+    const [x, y] = pointerWorld(ev);
+    spinFrom = { x, y, rot: [...viewRotation] };
+    spinMoved = false;
+    hideTooltip();
+    ev.preventDefault();
+    return;
+  }
   // The armed carve knife: a left press starts a possible stroke — a drag
   // becomes a freehand cut, a stationary click places a vertex of a
   // click-to-draw cut (double-click or Enter finishes it). A right press
@@ -2628,6 +3022,16 @@ svg.on("pointerdown", (ev) => {
   applyBrush(fips);
 });
 window.addEventListener("pointerup", () => {
+  // A spin settles on release: the coarse preview is replaced by a full bake
+  // at the facing the drag ended on. The settle is the expensive step, and it
+  // happens once per gesture rather than once per frame.
+  if (spinFrom) {
+    spinFrom = null;
+    // A press that never moved leaves the facing alone, so it costs no bake
+    // and still reads as a plain click on whatever is under it.
+    if (spinMoved) setRotation(viewRotation);
+    return;
+  }
   // A knife stroke settles on release: a drag cuts, a stationary click
   // places a vertex (at the press point, so a micro-wiggle can't move it).
   if (carveMode && knifeDrag) {
@@ -2655,6 +3059,11 @@ svg.on("contextmenu", (ev) => ev.preventDefault());
 // deselects: d3.zoom suppresses the click that follows a moved gesture.
 svg.on("click", (ev) => {
   if (paintMode || carveMode) return;
+  // The click that ends a spin drag is not a selection gesture.
+  if (spinMoved) {
+    spinMoved = false;
+    return;
+  }
   const fips = pickCounty(ev);
   select(fips ? assign.get(fips) : null);
 });
@@ -2804,6 +3213,21 @@ function processPointerMove() {
 }
 
 svg.on("pointermove", (ev) => {
+  // Mid-spin the pointer is steering the globe, not hovering a county: one
+  // radius of travel is one radian of arc, so the grabbed point tracks the
+  // cursor. Dragging right brings lower longitudes to the middle, and
+  // dragging down brings higher latitudes, which is why the two signs differ.
+  if (spinFrom) {
+    const [x, y] = pointerWorld(ev);
+    const dx = x - spinFrom.x;
+    const dy = y - spinFrom.y;
+    if (Math.hypot(dx, dy) > 0.5) spinMoved = true;
+    spinTo([
+      spinFrom.rot[0] + dx * DEG_PER_UNIT,
+      spinFrom.rot[1] - dy * DEG_PER_UNIT,
+    ]);
+    return;
+  }
   lastPointerEvent = ev;
   scheduleHover();
 });
@@ -3214,7 +3638,12 @@ el("reset").addEventListener("click", () => {
 });
 
 el("reset-view").addEventListener("click", () => {
-  svg.call(zoom.transform, HOME_TRANSFORM);
+  // A turned globe is part of the view, so resetting the view faces it home
+  // again as well as undoing the pan and zoom.
+  if (viewRotation[0] !== HOME_ROTATION[0] || viewRotation[1] !== HOME_ROTATION[1]) {
+    setRotation(HOME_ROTATION);
+  }
+  svg.call(zoom.transform, globeMode ? globeHomeTransform() : HOME_TRANSFORM);
 });
 
 // ----------------------------------------------------------------- presets
@@ -3697,7 +4126,49 @@ function applyPartition(fips, payload, pieces, stateOf, idSeq) {
     assign.delete(fips);
     origAssign.delete(fips);
   }
-  splits.set(fips, { pieces, backingId, idSeq, origState: orig, parentPartsByRegion, ...geo });
+  // The tract topology is kept, not just its projected output: turning the
+  // globe re-projects every carve from it (see rebakeSplits), so a carved
+  // county survives a rotation instead of having to be re-cut.
+  splits.set(fips, {
+    pieces,
+    backingId,
+    idSeq,
+    origState: orig,
+    parentPartsByRegion,
+    tractTopo: payload.topo,
+    ...geo,
+  });
+}
+
+// Re-project every carve through the current facing. The pieces themselves —
+// which tracts belong to which — are a fact about the cut, not the
+// projection, so only the geometry is rebuilt; the allocated rows, names and
+// ids all stand. The parent's own parts come from the freshly baked
+// BASE_COUNTY_PARTS, since the parent was retired from partsByFips by its
+// first carve.
+function rebakeSplits() {
+  if (!splits.size) return;
+  const parentParts = new Map();
+  for (const p of BASE_COUNTY_PARTS) {
+    if (!splits.has(p.fips)) continue;
+    const byRegion = parentParts.get(p.fips) ?? new Map();
+    const list = byRegion.get(p.region) ?? [];
+    list.push(p);
+    byRegion.set(p.region, list);
+    parentParts.set(p.fips, byRegion);
+  }
+  for (const [fips, s] of splits) {
+    const parentPartsByRegion = parentParts.get(fips) ?? new Map();
+    const geo = splitCountyGeometry({
+      tractTopo: s.tractTopo,
+      pieces: s.pieces,
+      backingId: s.backingId,
+      parentPartsByRegion,
+      projectParts,
+      projectLines,
+    });
+    splits.set(fips, { ...s, parentPartsByRegion, ...geo });
+  }
 }
 
 // ------------------------------------------------------------ from GeoJSON

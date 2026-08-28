@@ -19,7 +19,8 @@ None of them carry race/ethnicity or 2024 vote counts, because neither has an eq
 A small elections panel replays the 2024 vote on your map: the House is reapportioned to 435 seats (Huntington–Hill), each state's electoral votes follow, and the president is tallied winner-take-all per state (DC keeps its 3 electoral votes; units still outside the union are excluded).
 A toggle on the map switches between the atlas view (the usual colored states) and a data view that draws the selected stat itself: population and electoral votes as scaled circles, GDP as scaled squares, and the per-capita, income, education, race, and margin stats as state-level choropleths.
 
-The projection is an orthographic globe centered on the continent, drawn once at load — pan and zoom move the picture, not the sphere.
+The projection is an orthographic globe centered on the continent.
+Pan and zoom move the picture rather than the sphere, but the sphere itself can now be turned: the Globe button frames the whole globe and lets you drag it to face anywhere, and the map re-projects to that facing.
 The home view frames the lower 48; the rest of North America is context to pan and zoom out into.
 Alaska and Hawaii render in place on the globe, and are also duplicated into two inset boxes so they stay usable while the view is parked on the lower 48.
 The insets are fixed to the UI, not to the map: they render on their own canvas with a fixed camera, pinned at constant pixel size just above the bottom-left buttons, so panning and zooming the map leaves them put.
@@ -41,6 +42,7 @@ Vanilla JavaScript + [D3](https://d3js.org/), bundled with Vite. No framework.
 - `scripts/geo-lib.mjs` — the caching downloader and simplification repairs both pipelines share
 - `scripts/na-unit-data.mjs` — the static population/GDP table for non-US units, which doubles as the provincial control totals Canada's divisions are apportioned from
 - `scripts/split-check.mjs` — browserless checks of the carve logic against the real data
+- `scripts/globe-check.mjs` — browserless checks of the projection: that the atlas view is unchanged, and that turning the globe keeps producing drawable geometry
 
 State borders are not stored anywhere: they are recomputed on every change as the topological boundary between units assigned to different states (`topojson.mesh` with a filter), which is what lets borders redraw instantly as you paint.
 The atlas-style tinted band along every border is a single translucent near-black stroke on that mesh: compositing black at low opacity multiplies the fill underneath, so each side of a border reads as a band of its own state's color.
@@ -156,6 +158,38 @@ The US side of the seam keeps the full treatment as the union's outer edge, and 
   Lake Manitoba is deliberately left out: it isn't carved out of Manitoba's polygon, and drawn on top its narrow full-detail outline read as a stray squiggle of coastline next to the carved Lake Winnipeg.
   Whether a lake is carved out of the map's land (drawn under the fills) or sits inside unit polygons (drawn on top) is sampled rather than assumed, so it adapts to how each source drew its units; a lake carved on one side of the border but covered on the other (Lake of the Woods) draws on top, which reads correctly on both sides.
 
+## Turning the globe
+
+The projection used to be a literal buried in one expression, which quietly hardwired the whole app to North America.
+It is a parameter now, so the same renderer, masks, labels, hover and carving work at any facing — which is what adding a region beyond North America later needs.
+Nothing about that promise is speculative: `scripts/globe-check.mjs` projects the counties at several facings and checks that the geometry stays finite, stays inside the sphere's disc, and clips the far hemisphere away rather than folding it onto the near one.
+
+Three decisions carry the design.
+
+**The fit runs once; scale and translate are then frozen.**
+`fitSize` is still what places the lower 48 in the 975x610 design box, exactly as before, but only at the home facing.
+Its scale and translate are kept and reused for every other facing rather than recomputed, because re-fitting per rotation would re-frame whatever swung into view and the sphere would visibly breathe as it turned.
+Translate is where the sub-viewer point lands on screen, so holding it fixed is precisely what pins the globe's center.
+The check asserts that a bake at the home facing is bit-identical to the old expression — 398,406 coordinates, none differing — so the atlas view is provably untouched.
+
+**The re-bake runs on the CPU, not through deck.gl's `GlobeView`.**
+`GlobeView` is the obvious candidate and it is the wrong one here.
+It is still experimental, it does not support `MaskExtension` (which the border band, the seam aprons and the inset clipping all use), and it documents no high-precision rendering above zoom 12 — while carving works at zoom 16.
+It also only accepts lon/lat, so the plane coordinates that hover picking, the label raster, the carve fringe quads and the centroids all work in would have to be maintained as a second, separate projection that must agree with the GPU's to the pixel.
+Re-baking keeps one projection and one source of truth, and every one of those consumers keeps working with no changes at all.
+
+**A spin previews coarsely and settles precisely.**
+A full re-bake is about 130 ms, which is fine once at the end of a drag and hopeless at 60 fps.
+Thinning the full map does not rescue it: the cost is dominated by per-geometry stream overhead across ~3,400 counties and ~20,000 arcs, so even a heavily decimated full map sits around a 55 ms floor.
+So a drag re-projects one already merged land outline instead — the sphere, that silhouette, and the graticule are the only three things cheap enough per frame — and the full stack comes back on release.
+Making that outline cheap is mostly about dropping rings, not points: most of the merged outline's rings are already short (every lake islet and offshore rock), so a stride hits its don't-collapse floor on thousands of them and the point count barely moves.
+Dropping rings under a quarter degree first, then thinning, takes the preview from 15 ms to about 4 ms a frame, and the check holds it there.
+
+A rotation rebuilds more than the geometry, because several things are derived from it and cached.
+The label raster is sized from the land's projected bounds at construction, so the labeler is rebuilt rather than updated.
+The zoom's lower bound is "fit the land", which a new facing changes.
+Carves survive: the tract topology each cut was made from is kept on the split record, so a carved county is re-projected rather than lost, and the pieces, their allocated rows and their names all stand.
+
 ## Carving: design decisions
 
 Three decisions carry the design, all explained at length in `src/split.js`:
@@ -172,3 +206,4 @@ Three decisions carry the design, all explained at length in `src/split.js`:
   The divider lines between pieces come from the tract topology arc by arc, so state borders, the atlas band, selection outlines, and adjacency all work through the existing assignment tests.
 
 `node scripts/split-check.mjs` verifies the carve logic against the real files without a browser, the adjacent-carve and re-carve cases included.
+`node scripts/globe-check.mjs` does the same for the projection.

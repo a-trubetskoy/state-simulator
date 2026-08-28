@@ -28,6 +28,17 @@ The first downloads the sources, merges them by unit id, and rewrites `public/da
 The second builds the per-county census-tract files behind carving (51 state shapefiles, ~84,000 tracts, ~3,150 files) and needs the first to have run.
 Downloads are cached in `.cache/`.
 
+## Turning the globe
+
+The map is drawn on an actual globe, and the **Globe** button lets you turn it.
+It pulls the view back to show the whole sphere; drag to spin it, and the map redraws facing wherever you stopped.
+While you drag you see a simplified outline, and the full map — fills, borders, labels and all — comes back the moment you let go.
+Turning the button off drops you back into the normal atlas view, framed on whatever you turned to rather than on the lower 48.
+Reset view faces the globe home again along with undoing the pan and zoom.
+
+Today everything on the globe is North America, so turning it mostly shows you ocean.
+The point is that the map no longer assumes the continent it happens to hold: adding another part of the world is now a question of data, not of rebuilding the renderer.
+
 ## Carving counties
 
 The Carve button arms a knife that works directly on the map.

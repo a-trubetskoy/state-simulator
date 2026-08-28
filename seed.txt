@@ -1,0 +1,5 @@
+State Simulator
+
+Aesthetic: lighweight, fun, simple, basic, clean, minimally complex css
+
+People often wonder how fictional states would rank if they existed. For example if southern california was its own state, what would be the population? where would it rank nationally for gdp, gdp per capita, education, etc? We can easily do this by grabbing a bunch of county-level data and creating a simple map tool that is initialized to the actual current 50 US states, but the user can flip counties to create any state configuration they want. Maybe we can have searchable presets for defined regions or known state proposals etc: Midwest, New England, Virginia (1860 borders), Franklin (TN), Deseret, etc. 

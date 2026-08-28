@@ -1,0 +1,1077 @@
+/* Crisp minimal: white surfaces, hairline borders, square corners, dense
+   spacing, no shadows, no animations. */
+
+:root {
+  --text: #111;
+  --muted: #666;
+  --line: #ccc;
+  --line-strong: #888;
+  --accent: #0044cc;
+  --hover: #eee;
+  --sel: #e8eefc;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: Verdana, Geneva, Tahoma, sans-serif;
+  background: #fff;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* ------------------------------------------------------------- header */
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line-strong);
+  flex-wrap: wrap;
+}
+
+.brand {
+  flex: 1;
+  min-width: 220px;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+h1 {
+  font-size: 15px;
+  margin: 0;
+}
+
+.tagline {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.preset-box {
+  position: relative;
+}
+
+#preset-search {
+  width: 300px;
+  max-width: 45vw;
+  padding: 4px 8px;
+  border: 1px solid var(--line-strong);
+  font: inherit;
+  background: #fff;
+  outline: none;
+}
+
+#preset-search:focus {
+  border-color: var(--text);
+}
+
+#preset-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  background: #fff;
+  border: 1px solid var(--line-strong);
+  border-top: none;
+  max-height: 340px;
+  overflow: auto;
+  z-index: 20;
+}
+
+.preset-item {
+  padding: 5px 8px;
+  cursor: pointer;
+}
+
+.preset-item:hover {
+  background: var(--sel);
+}
+
+.preset-item small {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.preset-none {
+  padding: 6px 8px;
+  color: var(--muted);
+}
+
+/* ------------------------------------------------------------ buttons */
+
+.btn {
+  font: inherit;
+  padding: 4px 10px;
+  border: 1px solid var(--line-strong);
+  background: #fff;
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn:hover {
+  background: var(--hover);
+  border-color: var(--text);
+}
+
+.btn-primary {
+  background: var(--text);
+  border-color: var(--text);
+  color: #fff;
+}
+
+.btn-primary:hover {
+  background: #333;
+  color: #fff;
+}
+
+.btn-small {
+  padding: 1px 8px;
+  font-size: 11px;
+}
+
+/* A quiet button steps back from the panel's main actions: muted until
+   hovered, for the occasional tool (the GeoJSON import) that shouldn't
+   compete with Edit borders. */
+.btn-quiet {
+  color: var(--muted);
+}
+
+.btn-quiet:hover {
+  color: var(--text);
+}
+
+/* Discard is destructive, so it wears the app's red (the election bar's R
+   tone) instead of the neutral button grey. */
+#paint-discard {
+  color: #bf4040;
+  border-color: #bf4040;
+}
+
+#paint-discard:hover {
+  background: #fbeeec;
+  border-color: #bf4040;
+}
+
+/* --------------------------------------------------------- inset boxes */
+
+/* Alaska/Hawaii inset frames, shown while the matching #map-tools button is
+   active. The insets are UI, pinned above the bottom-left buttons: the
+   frames draw in the overlay SVG under a transform (set from main.js) that
+   matches the inset deck's fixed camera, and non-scaling strokes keep them
+   hairline-thin. */
+#inset-ui .inset-frame {
+  fill: none;
+  stroke: #b9c0ca;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+/* ---------------------------------------------------------------- map */
+
+main {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+/* Map on top, state panel beneath; the sidebar runs the full height beside
+   both. */
+#map-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+#map-wrap {
+  flex: 1;
+  position: relative;
+  min-height: 0;
+  /* Absolutely positioned children (tooltip, banner) must never extend the
+     document and summon a scrollbar — that shifts the whole layout. */
+  overflow: hidden;
+}
+
+#map-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+}
+
+/* The hover tint: its own deck, so hovering never redraws the map's stack.
+   Like the inset canvas it is pointer-transparent â the overlay SVG takes
+   every event. */
+#hover-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  pointer-events: none;
+}
+
+/* The Alaska/Hawaii insets: a deck of their own between the hover tint and
+   the overlay SVG. The SVG collects all pointer input, so this canvas never
+   needs to. */
+#inset-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  pointer-events: none;
+}
+
+/* The map is drawn on the canvas; this SVG is stretched over it so d3.zoom
+   and the pointer handlers keep working in the map's own 975x610 coordinates
+   instead of in device pixels. It also carries the data-view symbol labels,
+   which the browser keeps sharp at any zoom. */
+#map {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: grab;
+}
+
+#map:active {
+  cursor: grabbing;
+}
+
+#map.painting {
+  cursor: crosshair;
+}
+
+/* The font size lives on the group as an SVG attribute (set from main.js,
+   which needs the number for its fit test) — a CSS font-size here would
+   override it. It's in viewBox units, so labels scale with the map exactly
+   like the marks they sit on. paint-order draws the stroke behind the fill,
+   which turns it into a halo; semitransparent white lets the mark or ramp
+   color glow through instead of punching an opaque hole in it. pointer-events
+   must stay off or the text would steal county hover and paint clicks from
+   the rect beneath it. */
+#data-labels text {
+  font-family: Verdana, Geneva, Tahoma, sans-serif;
+  fill: #000;
+  stroke: #fff;
+  stroke-opacity: 0.7;
+  stroke-width: 2px;
+  stroke-linejoin: round;
+  paint-order: stroke;
+  text-anchor: middle;
+  dominant-baseline: central;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* On dark choropleth fills, black-on-white inverts to white-on-black. */
+#data-labels text.inverse {
+  fill: #fff;
+  stroke: #000;
+}
+
+/* Atlas state names, set along each state's long axis. Font size and
+   letter-spacing are per-label attributes (labels.js fits them to each
+   state's shape); the same halo trick and pointer-events rules as the data
+   labels above apply here. The inset copies (#inset-state-labels, pinned
+   with the boxes instead of riding the zoom) wear the same clothes. */
+#state-labels,
+#inset-state-labels {
+  pointer-events: none;
+  user-select: none;
+}
+
+#state-labels text,
+#inset-state-labels text {
+  font-family: Verdana, Geneva, Tahoma, sans-serif;
+  fill: #4a4a44;
+  stroke: #fff;
+  stroke-opacity: 0.55;
+  stroke-linejoin: round;
+  paint-order: stroke;
+}
+
+#state-labels line,
+#inset-state-labels line {
+  stroke: #1a1a1a;
+  stroke-width: 0.7;
+}
+
+#paint-banner[hidden],
+#carve-banner[hidden] {
+  display: none;
+}
+
+#paint-banner,
+#carve-banner {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #fff;
+  border: 1px solid var(--text);
+  padding: 4px 6px 4px 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  white-space: nowrap;
+}
+
+#paint-banner .hint,
+#carve-banner .hint {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* The armed Carve button inverts, like the view-mode and inset toggles. */
+#carve.active {
+  background: var(--text);
+  border-color: var(--text);
+  color: #fff;
+}
+
+/* Transient notices over the map (sliced X in two, no tract data here, …):
+   under the banner spot so the two never collide, wrapping when a stroke
+   crossed several counties. */
+#map-note[hidden] {
+  display: none;
+}
+
+#map-note {
+  position: absolute;
+  top: 44px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #fff;
+  border: 1px solid var(--line-strong);
+  color: var(--text);
+  padding: 4px 10px;
+  font-size: 12px;
+  max-width: min(560px, 80%);
+  text-align: center;
+  pointer-events: none;
+}
+
+/* Bottom-left button cluster: Reset view plus the Alaska/Hawaii inset
+   toggles. An active toggle inverts, like the view-mode buttons. */
+#map-tools {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  display: flex;
+  gap: 6px;
+}
+
+#map-tools .btn.active {
+  background: var(--text);
+  border-color: var(--text);
+  color: #fff;
+}
+
+/* atlas / data view toggle */
+
+#view-toggle {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  display: flex;
+  background: #fff;
+  border: 1px solid var(--line-strong);
+}
+
+#view-toggle[hidden] {
+  display: none;
+}
+
+#view-toggle button {
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 10px;
+  border: none;
+  background: none;
+  color: var(--text);
+  cursor: pointer;
+}
+
+#view-toggle button + button {
+  border-left: 1px solid var(--line-strong);
+}
+
+#view-toggle button:hover {
+  background: var(--hover);
+}
+
+#view-toggle button.active {
+  background: var(--text);
+  color: #fff;
+}
+
+/* data view legend */
+
+#map-legend {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  background: #fff;
+  border: 1px solid var(--line-strong);
+  padding: 6px 8px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+#map-legend[hidden] {
+  display: none;
+}
+
+#map-legend b {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.legend-bar {
+  width: 160px;
+  height: 10px;
+  border: 1px solid var(--line);
+}
+
+.legend-ends {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.legend-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+
+/* Swatch colors are set inline from the stat's own symbol colors. */
+.legend-note .sym {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  border: 1px solid;
+}
+
+.sym.circle {
+  border-radius: 50%;
+}
+
+/* The unit-chart swatch is a single dot at the scale it draws on the map. */
+.sym.dots {
+  border-radius: 50%;
+  width: 7px;
+  height: 7px;
+}
+
+#tooltip {
+  position: absolute;
+  pointer-events: none;
+  background: #ffffe1;
+  color: #000;
+  border: 1px solid #000;
+  padding: 3px 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  z-index: 10;
+  max-width: 240px;
+}
+
+/* The estimated-fields caveat on a split county's half. */
+#tooltip .tip-note {
+  color: #666;
+  font-size: 10px;
+}
+
+/* The split tool's knife line: a dark stroke over a white casing so it reads
+   over any tract fill, hairline at every zoom. */
+#knife {
+  pointer-events: none;
+}
+
+#knife path {
+  fill: none;
+  vector-effect: non-scaling-stroke;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+#knife .knife-casing {
+  stroke: #fff;
+  stroke-width: 4;
+}
+
+#knife .knife-line {
+  stroke: #222;
+  stroke-width: 1.6;
+}
+
+#knife circle {
+  fill: #222;
+  stroke: #fff;
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
+/* ------------------------------------------------------------ sidebar */
+
+#sidebar {
+  width: 330px;
+  border-left: 1px solid var(--line-strong);
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+
+.card {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.rank-chip {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.dot {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+}
+
+/* The state card's dot doubles as the color-picker button. */
+.dot-wrap {
+  position: relative;
+  display: flex;
+}
+
+button.dot {
+  padding: 0;
+  cursor: pointer;
+}
+
+button.dot:disabled {
+  cursor: default;
+}
+
+/* Palette popover: 7 columns put the base colors on the top row and the
+   backup tier below. */
+#color-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 5;
+  background: #fff;
+  border: 1px solid var(--line-strong);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  padding: 6px;
+  display: grid;
+  grid-template-columns: repeat(7, 14px);
+  gap: 5px;
+}
+
+#color-menu[hidden] {
+  display: none;
+}
+
+.swatch {
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+}
+
+.swatch.current {
+  outline: 2px solid #333;
+  outline-offset: 1px;
+}
+
+/* ------------------------------------------- state panel (bottom bar) */
+
+/* Both sections occupy the same grid cell, and the hidden one is invisible
+   rather than removed — so the panel is always as tall as the taller section
+   and the map viewport can't jiggle when a selection appears or clears. The
+   min-height budgets for the tallest identity column: a foreign unit's third
+   action button wraps .panel-actions onto a second row. */
+#state-panel {
+  border-top: 1px solid var(--line-strong);
+  background: #fff;
+  display: grid;
+}
+
+#state-panel section {
+  grid-area: 1 / 1;
+  min-height: 132px;
+  padding: 10px 14px;
+  display: flex;
+  align-items: stretch;
+  gap: 16px;
+}
+
+#state-panel section[hidden] {
+  visibility: hidden;
+}
+
+#empty-card {
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+}
+
+#empty-card p {
+  margin: 0;
+}
+
+/* Identity column: swatch + editable name, county count, the paint button. */
+.panel-id {
+  flex: none;
+  width: 210px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+}
+
+.card-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.state-name {
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  border: none;
+  background: transparent;
+  flex: 1;
+  min-width: 0;
+  padding: 2px 4px;
+  outline: none;
+}
+
+.state-name:hover {
+  background: var(--hover);
+}
+
+.state-name:focus {
+  background: #fff;
+  outline: 1px dotted var(--muted);
+}
+
+.panel-meta {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* Wraps because a foreign unit shows three buttons, which don't fit the
+   210px column on one row; the section min-height already budgets for the
+   second row, so the wrap never changes the panel height. */
+.panel-actions {
+  align-self: flex-start;
+  margin-top: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* The stats spread across the bar as label-over-value blocks; the grid
+   re-wraps them into fewer columns as the window narrows. */
+.panel-stats {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(108px, 1fr));
+  gap: 8px 14px;
+  align-content: center;
+  border-left: 1px solid var(--line);
+  padding-left: 16px;
+}
+
+.stat {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.stat-label {
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Empty values and chips (before the first selection fills them in) keep
+   their line's height, so a stat block is the same size filled or not. */
+.stat b {
+  font-size: 13px;
+  min-height: 18px;
+}
+
+.stat .rank-chip {
+  min-height: 15px;
+}
+
+/* Per-stat visuals. Every kind — bar, dial, dot grid — fills the same 28px
+   band, so all stat blocks (and with them the panel) share one height no
+   matter which state is selected. */
+
+/* Bars are scaled against the current leader, like the rankings list. */
+.stat-bar {
+  width: 100%;
+  max-width: 120px;
+  height: 8px;
+  margin: 10px 0;
+  background: #f0f2f5;
+  overflow: hidden;
+}
+
+.stat-bar i {
+  display: block;
+  height: 100%;
+  background: #9fb6d4;
+}
+
+.stat-dial {
+  width: 52px;
+  height: 28px;
+}
+
+/* One dot per House seat or electoral vote; the column count, dot size and
+   gap come inline from the band-fitting in main.js. */
+.stat-dots {
+  height: 28px;
+  display: grid;
+  justify-content: start;
+  align-content: center;
+}
+
+.stat-dots i {
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+}
+
+#d-seats i {
+  background: #5f6b7a;
+}
+
+#d-ev i {
+  background: #7d66ba;
+}
+
+/* race/ethnicity breakdown */
+
+#race-wrap {
+  flex: none;
+  width: 260px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  border-left: 1px solid var(--line);
+  padding-left: 16px;
+}
+
+/* Hidden (a unit with no race data) keeps its footprint, like the panel
+   sections above: removing the column would widen the stats grid, re-wrap it
+   into fewer rows, and change the panel height — the map above would jump. */
+#race-wrap[hidden] {
+  visibility: hidden;
+}
+
+#race-bar {
+  display: flex;
+  height: 12px;
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+
+#race-bar i {
+  display: block;
+  height: 100%;
+}
+
+#race-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+#race-legend i {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 3px;
+}
+
+/* elections card */
+
+.mini-head {
+  font-size: 11px;
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+#elections .mini-head {
+  margin-bottom: 6px;
+}
+
+.e-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0;
+}
+
+.e-label {
+  width: 56px;
+  color: var(--muted);
+  flex: none;
+}
+
+.e-d,
+.e-r {
+  width: 26px;
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.e-d {
+  color: #3568b8;
+  text-align: right;
+}
+
+.e-r {
+  color: #bf4040;
+}
+
+.e-d.win,
+.e-r.win {
+  font-weight: 700;
+}
+
+.ebar {
+  flex: 1;
+  display: flex;
+  height: 12px;
+  background: #eee;
+  position: relative;
+  overflow: hidden;
+}
+
+.ebar i {
+  display: block;
+  height: 100%;
+}
+
+.ebar .ed {
+  background: #5b8ed6;
+}
+
+.ebar .ex {
+  background: #c9c9c9;
+}
+
+.ebar .er {
+  background: #d66a5b;
+}
+
+/* majority tick */
+.ebar::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: #333;
+}
+
+.e-note {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+/* rankings */
+
+#rankings {
+  display: flex;
+  flex-direction: column;
+  min-height: 200px;
+  flex: 1;
+}
+
+.rank-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+
+#rank-stat {
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 4px;
+  border: 1px solid var(--line-strong);
+  background: #fff;
+}
+
+#rank-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  flex: 1;
+}
+
+#rank-list li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+#rank-list li:hover {
+  background: var(--hover);
+}
+
+#rank-list li.sel {
+  background: var(--sel);
+  border-color: var(--text);
+}
+
+#rank-list li.changed .nm {
+  font-weight: 700;
+}
+
+#rank-list .pos {
+  width: 22px;
+  text-align: right;
+  color: var(--muted);
+  font-size: 11px;
+  flex: none;
+}
+
+#rank-list .chg-wrap {
+  width: 28px; /* fits a two-digit delta ("▼12") without overflowing */
+  flex: none;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: right;
+}
+
+#rank-list .chg.up {
+  color: #2a9d5c;
+}
+
+#rank-list .chg.down {
+  color: #d6483f;
+}
+
+#rank-list .chg.same {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+#rank-list .chg.new {
+  color: var(--accent);
+}
+
+#rank-list .dot {
+  width: 9px;
+  height: 9px;
+}
+
+#rank-list .nm {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* mini scaled bars */
+#rank-list .bar {
+  flex: none;
+  width: 48px;
+  height: 8px;
+  background: #f0f2f5;
+  position: relative;
+  overflow: hidden;
+}
+
+#rank-list .bar i {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  background: #9fb6d4;
+}
+
+#rank-list .bar.diverge::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: #bbb;
+}
+
+#rank-list .bar .bd {
+  left: 50%;
+  background: #5b8ed6;
+}
+
+#rank-list .bar .br {
+  left: auto;
+  right: 50%;
+  background: #d66a5b;
+}
+
+#rank-list .val {
+  color: var(--muted);
+  flex: none;
+  width: 64px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+#sources {
+  color: var(--muted);
+  font-size: 10px;
+  padding: 6px 10px;
+  line-height: 1.5;
+}

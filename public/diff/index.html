@@ -1,0 +1,87 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>diff</title>
+    <style>
+      body { margin: 0; background: #222; color: #eee; font: 12px monospace; }
+      canvas { display: block; image-rendering: pixelated; }
+      #out { padding: 6px; }
+    </style>
+  </head>
+  <body>
+    <div id="out">loading…</div>
+    <canvas id="c"></canvas>
+    <script>
+      const load = (src) =>
+        new Promise((res) => {
+          const i = new Image();
+          i.onload = () => res(i);
+          i.src = src;
+        });
+
+      window.runDiff = async (a, b, threshold = 24) => {
+        const [ia, ib] = await Promise.all([load(a), load(b)]);
+        const w = Math.min(ia.width, ib.width);
+        const h = Math.min(ia.height, ib.height);
+        const grab = (img) => {
+          const cv = document.createElement("canvas");
+          cv.width = w;
+          cv.height = h;
+          const cx = cv.getContext("2d", { willReadFrequently: true });
+          cx.drawImage(img, 0, 0);
+          return cx.getImageData(0, 0, w, h).data;
+        };
+        const A = grab(ia);
+        const B = grab(ib);
+        const c = document.getElementById("c");
+        c.width = w;
+        c.height = h;
+        const cx = c.getContext("2d");
+        const out = cx.createImageData(w, h);
+        let over = 0;
+        let sum = 0;
+        let max = 0;
+        const boxes = new Map();
+        for (let p = 0; p < w * h; p++) {
+          const i = p * 4;
+          const d = Math.max(
+            Math.abs(A[i] - B[i]),
+            Math.abs(A[i + 1] - B[i + 1]),
+            Math.abs(A[i + 2] - B[i + 2])
+          );
+          sum += d;
+          if (d > max) max = d;
+          const hot = d > threshold;
+          if (hot) {
+            over++;
+            const x = p % w;
+            const y = (p / w) | 0;
+            const key = ((y / 40) | 0) + "," + ((x / 40) | 0);
+            boxes.set(key, (boxes.get(key) || 0) + 1);
+          }
+          out.data[i] = hot ? 255 : 0;
+          out.data[i + 1] = hot ? 0 : Math.min(255, d * 4);
+          out.data[i + 2] = 0;
+          out.data[i + 3] = 255;
+        }
+        cx.putImageData(out, 0, 0);
+        const worst = [...boxes.entries()].sort((x, y) => y[1] - x[1]).slice(0, 12);
+        const report = {
+          size: [w, h],
+          meanAbsDiff: +(sum / (w * h)).toFixed(3),
+          maxDiff: max,
+          pixelsOver: over,
+          pctOver: +((100 * over) / (w * h)).toFixed(3),
+          worstCells: worst.map(([k, n]) => {
+            const [gy, gx] = k.split(",").map(Number);
+            return { x: gx * 40, y: gy * 40, n };
+          }),
+        };
+        document.getElementById("out").textContent = JSON.stringify(report, null, 1);
+        return report;
+      };
+      window.runDiff("/diff/ref.jpg", "/diff/new.jpg");
+    </script>
+  </body>
+</html>

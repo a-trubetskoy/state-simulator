@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>State Simulator</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22><defs><clipPath id=%22c%22><path d=%22M2 1h12v6.3c0 4.4-3.6 6.7-6 7.7-2.4-1-6-3.3-6-7.7z%22/></clipPath></defs><g clip-path=%22url(%23c)%22><rect width=%2216%22 height=%2216%22 fill=%22%23fff%22/><rect x=%223.71%22 y=%221%22 width=%221.72%22 height=%2215%22 fill=%22%23bf0a30%22/><rect x=%227.14%22 y=%221%22 width=%221.72%22 height=%2215%22 fill=%22%23bf0a30%22/><rect x=%2210.57%22 y=%221%22 width=%221.72%22 height=%2215%22 fill=%22%23bf0a30%22/><rect x=%222%22 y=%221%22 width=%2212%22 height=%224.6%22 fill=%22%23002868%22/></g><path d=%22M2 1h12v6.3c0 4.4-3.6 6.7-6 7.7-2.4-1-6-3.3-6-7.7z%22 fill=%22none%22 stroke=%22%23002868%22 stroke-width=%221.2%22/></svg>"
+    />
+  </head>
+  <body>
+    <div id="app">
+      <header>
+        <div class="brand">
+          <h1>State Simulator</h1>
+          <p class="tagline">Flip counties into new states and see how they'd rank.</p>
+        </div>
+        <div class="preset-box">
+          <input
+            id="preset-search"
+            type="text"
+            placeholder="Load a preset: Deseret, New England, SoCal&hellip;"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <div id="preset-menu" hidden></div>
+        </div>
+        <button id="new-state" class="btn btn-primary">New state</button>
+        <button id="carve" class="btn" aria-pressed="false" title="Draw a line across a county to split it along its census tracts">Carve</button>
+        <button id="reset" class="btn">Reset</button>
+      </header>
+
+      <main>
+        <div id="map-col">
+          <div id="map-wrap">
+            <canvas id="map-canvas"></canvas>
+            <!-- The hover tint draws on its own canvas so a mouse move
+                 repaints one county instead of the map's whole layer stack.
+                 It sits under the inset canvas, so the Alaska/Hawaii boxes
+                 still cover a hovered county that lies beneath them. -->
+            <canvas id="hover-canvas"></canvas>
+            <!-- The Alaska/Hawaii insets draw on their own canvas with a
+                 fixed camera, so they stay pinned to the corner while the
+                 map underneath pans and zooms. -->
+            <canvas id="inset-canvas"></canvas>
+            <!-- The map is drawn on the canvas above. This SVG sits on top to
+                 collect pointer input, so d3.zoom keeps working in the map's
+                 own 975x610 coordinates; the rect is what makes the whole box
+                 hit-testable. The one thing it draws itself is the labels —
+                 atlas state names and the data-view values — because the
+                 browser keeps vector text sharp at any zoom where a GPU glyph
+                 atlas goes soft. -->
+            <svg id="map" viewBox="0 0 975 610" preserveAspectRatio="xMidYMid meet">
+              <defs>
+                <!-- Knocks the open inset boxes out of the zoomed label
+                     groups: the boxes cover the map, but this SVG rides
+                     above the inset canvas too, so a globe label panned
+                     under a box would otherwise float over it. The holes
+                     group carries the same transform as the frames. -->
+                <mask id="inset-hole-mask" maskUnits="userSpaceOnUse" x="-99999" y="-99999" width="199999" height="199999">
+                  <rect x="-99999" y="-99999" width="199999" height="199999" fill="#fff" />
+                  <g id="inset-mask-holes"></g>
+                </mask>
+              </defs>
+              <rect x="-9999" y="-9999" width="99999" height="99999" fill="none" pointer-events="all" />
+              <g mask="url(#inset-hole-mask)"><g id="state-labels"></g></g>
+              <g id="inset-ui"></g>
+              <g id="inset-state-labels"></g>
+              <g mask="url(#inset-hole-mask)"><g id="data-labels"></g></g>
+              <!-- The split tool's knife line: drawn in map coordinates and
+                   carried by the zoom transform, so redrawing it per pointer
+                   move is a cheap attribute write, not a deck rebuild. -->
+              <g id="knife"><path class="knife-casing" /><path class="knife-line" /></g>
+            </svg>
+            <div id="view-toggle">
+              <button id="view-atlas" class="active">Atlas</button>
+              <button id="view-data">Data</button>
+            </div>
+            <div id="map-legend" hidden></div>
+            <div id="paint-banner" hidden>
+              Painting <b id="paint-name"></b>
+              <span class="hint">click or drag to claim counties · click again or right-click to give back</span>
+              <button id="paint-discard" class="btn btn-small" title="Give back every county this state has claimed; a brand-new state is deleted">Discard</button>
+              <button id="paint-done" class="btn btn-small">Done</button>
+            </div>
+            <div id="carve-banner" hidden>
+              <b>Carving</b>
+              <span class="hint">drag a line in one side of a county and out the other · or click corner by corner, double-click or Enter to finish</span>
+              <button id="carve-done" class="btn btn-small">Done</button>
+            </div>
+            <!-- Transient notices (no tract data here, county rejoined, …) -->
+            <div id="map-note" hidden></div>
+            <div id="map-tools">
+              <button id="reset-view" class="btn btn-small">Reset view</button>
+              <button id="inset-ak" class="btn btn-small" aria-pressed="false" title="Show the Alaska inset">Alaska</button>
+              <button id="inset-hi" class="btn btn-small" aria-pressed="false" title="Show the Hawaii inset">Hawaii</button>
+            </div>
+            <div id="tooltip" hidden></div>
+          </div>
+
+          <!-- Selected-state panel: a horizontal bar under the map, abutting
+               the sidebar, so the map viewport stays landscape like the
+               country it shows. -->
+          <div id="state-panel">
+            <section id="empty-card">
+              <p>Click any state on the map to see its stats — then hit <b>New state</b> (or load a preset) and paint counties to redraw America.</p>
+            </section>
+
+            <section id="state-card" hidden>
+              <div class="panel-id">
+                <div class="card-top">
+                  <span class="dot-wrap">
+                    <button id="state-dot" class="dot" title="Change color"></button>
+                    <div id="color-menu" hidden></div>
+                  </span>
+                  <input id="state-name" class="state-name" spellcheck="false" />
+                </div>
+                <div class="panel-meta"><span id="v-n"></span> counties</div>
+                <div class="panel-actions">
+                  <button id="add-state" class="btn btn-primary" title="Admit this unit into the union as a US state" hidden>Add as US state</button>
+                  <button id="edit-borders" class="btn">Edit borders</button>
+                  <button id="copy-json" class="btn" title="Copy this state and its counties as JSON">Copy JSON</button>
+                  <button id="from-geojson" class="btn btn-quiet" hidden title="Paint this state from a GeoJSON boundary: whole counties inside it are claimed, counties it crosses are carved along census tracts">From GeoJSON&hellip;</button>
+                  <input id="geojson-file" type="file" accept=".json,.geojson,application/geo+json" hidden />
+                </div>
+              </div>
+              <div class="panel-stats">
+                <div class="stat"><span class="stat-label">Population</span><b id="v-pop"></b><span class="stat-bar"><i id="b-pop"></i></span><span id="r-pop" class="rank-chip"></span></div>
+                <div class="stat"><span class="stat-label">GDP</span><b id="v-gdp"></b><span class="stat-bar"><i id="b-gdp"></i></span><span id="r-gdp" class="rank-chip"></span></div>
+                <div class="stat"><span class="stat-label">GDP per capita</span><b id="v-gdppc"></b><span class="stat-bar"><i id="b-gdppc"></i></span><span id="r-gdppc" class="rank-chip"></span></div>
+                <div class="stat"><span class="stat-label">Median HH income</span><b id="v-mhi"></b><span class="stat-bar"><i id="b-mhi"></i></span><span id="r-mhi" class="rank-chip"></span></div>
+                <div class="stat"><span class="stat-label">Bachelor's degree+</span><b id="v-bach"></b><span class="stat-bar"><i id="b-bach"></i></span><span id="r-bach" class="rank-chip"></span></div>
+                <div class="stat"><span class="stat-label">2024 president</span><b id="v-margin"></b>
+                  <!-- Lean dial: the band spans D+30 (left) to R+30 (right);
+                       the needle clamps at the ends. -->
+                  <svg id="dial-margin" class="stat-dial" viewBox="0 0 52 28" aria-hidden="true">
+                    <path d="M 1 27 A 25 25 0 0 1 26 2 L 26 9 A 18 18 0 0 0 8 27 Z" fill="#5b8ed6" fill-opacity=".35"/>
+                    <path d="M 26 2 A 25 25 0 0 1 51 27 L 44 27 A 18 18 0 0 0 26 9 Z" fill="#d66a5b" fill-opacity=".35"/>
+                    <line x1="26" y1="2" x2="26" y2="9" stroke="#fff"/>
+                    <line id="dial-needle" x1="26" y1="27" x2="26" y2="3.5" stroke="#111" stroke-width="2"/>
+                    <circle cx="26" cy="27" r="2.2" fill="#111"/>
+                  </svg>
+                  <span id="r-margin" class="rank-chip"></span></div>
+                <div class="stat"><span class="stat-label">House seats</span><b id="v-seats"></b><span id="d-seats" class="stat-dots"></span><span class="rank-chip"></span></div>
+                <div class="stat"><span class="stat-label">Electoral votes</span><b id="v-ev"></b><span id="d-ev" class="stat-dots"></span><span id="r-ev" class="rank-chip"></span></div>
+              </div>
+              <div id="race-wrap">
+                <div id="race-bar"></div>
+                <div id="race-legend"></div>
+              </div>
+            </section>
+          </div>
+        </div>
+
+        <aside id="sidebar">
+          <section id="elections" class="card">
+            <h2 class="mini-head">If the 2024 vote elected the president</h2>
+            <div class="e-row">
+              <span class="e-label">President</span>
+              <span class="e-d" id="e-pres-d"></span>
+              <div class="ebar" id="e-pres-bar"><i class="ed"></i><i class="ex"></i><i class="er"></i></div>
+              <span class="e-r" id="e-pres-r"></span>
+            </div>
+            <p class="e-note">
+              Winner-take-all per state.
+              Electoral votes follow the 435 House seats reapportioned to this map, plus 2 per state; DC keeps 3.
+            </p>
+          </section>
+
+          <section id="rankings" class="card">
+            <div class="rank-head">
+              <h2 class="mini-head">Rankings</h2>
+              <select id="rank-stat">
+                <option value="pop">Population</option>
+                <option value="landArea">Land area</option>
+                <option value="gdp">GDP</option>
+                <option value="gdppc">GDP per capita</option>
+                <option value="mhi">Median HH income</option>
+                <option value="bach">Bachelor's degree+</option>
+                <option value="margin">2024 margin (D&ndash;R)</option>
+                <option value="ev">Electoral votes</option>
+                <option value="wht">% White</option>
+                <option value="blk">% Black</option>
+                <option value="hsp">% Hispanic</option>
+                <option value="asn">% Asian</option>
+              </select>
+            </div>
+            <ol id="rank-list"></ol>
+          </section>
+
+          <footer id="sources"></footer>
+        </aside>
+      </main>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

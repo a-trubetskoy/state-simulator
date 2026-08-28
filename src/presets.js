@@ -874,8 +874,12 @@ export const PRESETS = [
     id: "bootheel-mo",
     name: "Bootheel",
     label: "Bootheel (MO)",
-    desc: "The 6-county service area of the Bootheel Regional Planning Commission, in Missouri's southeastern lowlands",
-    counties: ["29069", "29133", "29143", "29155", "29199", "29205"],
+    desc: "The literal boot-heel panhandle of southeastern Missouri: Dunklin and Pemiscot counties, plus the southeastern part of New Madrid County",
+    counties: [
+      "29069",
+      { fips: "29143", tracts: ["29143960400", "29143960500", "29143960600"] },
+      "29155",
+    ],
   },
   {
     id: "kansas-city-metro",

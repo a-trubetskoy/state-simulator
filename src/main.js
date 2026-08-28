@@ -8,12 +8,13 @@ import {
   SolidPolygonLayer,
 } from "@deck.gl/layers";
 import { DataFilterExtension, MaskExtension } from "@deck.gl/extensions";
-import { PRESETS, resolvePreset } from "./presets.js";
+import { PRESETS, resolvePreset, partialCounties } from "./presets.js";
 import { createStateLabeler } from "./labels.js";
 import {
   allocatePieces,
   partsContain,
   reclassifyRecords,
+  rewindGeometry,
   splitCountyGeometry,
   tractsAcrossCut,
 } from "./split.js";
@@ -908,7 +909,7 @@ const splits = new Map(); // parentId -> { pieces, backingId, idSeq, origState, 
 let carveMode = false; // the Carve button's knife tool is armed
 let carvePending = []; // click-to-draw knife vertices awaiting their finish
 let knifeDrag = null; // a left press while carving, until it settles as drag or click
-let carving = false; // a finished stroke is being applied (tract fetches)
+let carving = false; // a finished stroke, GeoJSON import, or preset carve is being applied (tract fetches)
 
 const BASE_COUNTY_PARTS = countyParts.slice();
 const BASE_ARC_PATHS = arcPaths.slice();
@@ -918,16 +919,6 @@ const BASE_ADJ = new Map([...countyAdj].map(([k, v]) => [k, v.slice()]));
 function rebuildWorld() {
   const parents = new Set(splits.keys());
   const all = [...splits.values()];
-  // Carved parts lead the array so every base county draws over them: the
-  // neighbours' fills clip whatever fringe the tract-detail pieces poke past
-  // the drawn county line (split.js explains the two-source mismatch).
-  countyParts.length = 0;
-  countyParts.push(
-    ...all.flatMap((s) => s.renderParts),
-    ...BASE_COUNTY_PARTS.filter((p) => !parents.has(p.fips))
-  );
-  mainCountyParts.length = 0;
-  for (const p of countyParts) if (p.region === "main") mainCountyParts.push(p);
 
   // Boundary records touching a carved county are re-owned from the current
   // partitions (see split.js's reclassifyRecords): a probe just inside the
@@ -937,14 +928,21 @@ function rebuildWorld() {
   const touched = (r) => parents.has(r.a) || parents.has(r.b);
   const opts = {
     ownerAt: (pt, r) => {
+      let inFringe = false;
       for (const id of r.a === r.b ? [r.a] : [r.a, r.b]) {
         const s = splits.get(id);
         if (!s) continue;
         const c = s.contains.get(r.region);
         if (!c || !c.parent(pt)) continue;
         for (const [pid, inPiece] of c.pieces) if (inPiece(pt)) return pid;
-        return s.backingId; // inside the drawn county, outside every true union: the fringe the backing paints
+        // Inside the drawn county but between its true tract unions — the
+        // drawn-versus-true fringe. Unresolved on purpose: the ladder's
+        // deeper probes will land in the piece whose territory lies beyond,
+        // so a fringe stretch never reads as the backing piece's border.
+        inFringe = true;
+        break;
       }
+      if (inFringe) return null;
       const aSplit = parents.has(r.a);
       const bSplit = parents.has(r.b);
       if (aSplit && bSplit) return null;
@@ -953,17 +951,33 @@ function rebuildWorld() {
     defaultsFor: (r) => [splits.get(r.a)?.backingId ?? r.a, splits.get(r.b)?.backingId ?? r.b],
     familyOf: (id) => pieceParent.get(id) ?? id,
   };
+  const reownedArcs = reclassifyRecords(BASE_ARC_PATHS.filter(touched), opts);
+  const reownedEdges = reclassifyRecords(BASE_EDGE_BAND.filter(touched), opts);
   arcPaths.length = 0;
   arcPaths.push(
     ...BASE_ARC_PATHS.filter((r) => !touched(r)),
-    ...reclassifyRecords(BASE_ARC_PATHS.filter(touched), opts),
+    ...reownedArcs,
     ...all.flatMap((s) => s.dividerRecords)
   );
   edgeBandPaths.length = 0;
-  edgeBandPaths.push(
-    ...BASE_EDGE_BAND.filter((r) => !touched(r)),
-    ...reclassifyRecords(BASE_EDGE_BAND.filter(touched), opts)
+  edgeBandPaths.push(...BASE_EDGE_BAND.filter((r) => !touched(r)), ...reownedEdges);
+
+  // Carved parts lead the fill array so every base county draws over them:
+  // the neighbours' fills clip whatever the tract-detail pieces poke past
+  // the drawn county line (split.js explains the two-source mismatch).
+  // Order within the carved block: backings, then the fringe ribbons cut
+  // from the re-owned records above, then the piece unions — so the fringe
+  // wears its OWNER's color, not the backing's, and the fills agree with the
+  // border classification to the pixel.
+  countyParts.length = 0;
+  countyParts.push(
+    ...all.flatMap((s) => s.backingParts),
+    ...fringeRibbons([...reownedArcs, ...reownedEdges], pieceParent),
+    ...all.flatMap((s) => s.pieceParts),
+    ...BASE_COUNTY_PARTS.filter((p) => !parents.has(p.fips))
   );
+  mainCountyParts.length = 0;
+  for (const p of countyParts) if (p.region === "main") mainCountyParts.push(p);
 
   partsByFips.clear();
   for (const p of countyParts) {
@@ -995,6 +1009,72 @@ function rebuildWorld() {
   }
   computeCountyGeo();
   rebuildDerived();
+}
+
+// The fringe between a piece's true tract union and its county's drawn
+// outline is covered by the parent-shaped backing, which wears the WRONG
+// color wherever the stretch belongs to a different piece — thin slivers of
+// a foreign state tracing county lines. Each piece-owned boundary run
+// therefore gets a ribbon of dumb quads extruded just inside the drawn line
+// in that piece's own fips, drawn over the backing and under the true
+// unions (the same trick as the border seam's aprons): the unions cover the
+// ribbon wherever real territory exists, so only the fringe ever shows it.
+// Overshoot past the drawn line is clipped by the neighbours' fills, which
+// draw later. Depth is the map's own simplification tolerance — the bound
+// on how far drawn and true can disagree.
+function fringeRibbons(records, pieceParent) {
+  const DEPTH = 0.35; // design units, ~1.6 km of ground
+  const out = [];
+  for (const r of records) {
+    const sides = r.a === r.b ? [r.a] : [r.a, r.b];
+    for (const pid of sides) {
+      const parent = pieceParent.get(pid);
+      if (!parent) continue;
+      const s = splits.get(parent);
+      if (pid === s.backingId) continue; // the backing already paints its own fringe
+      const inParent = s.contains.get(r.region)?.parent;
+      if (!inParent) continue;
+      const path = r.path;
+      for (let i = 0; i < path.length - 1; i++) {
+        const [x1, y1] = path[i];
+        const [x2, y2] = path[i + 1];
+        const dx = x2 - x1;
+        const dy = y2 - y1;
+        const len = Math.hypot(dx, dy);
+        if (!len) continue;
+        const ux = dx / len;
+        const uy = dy / len;
+        const nx = -uy;
+        const ny = ux;
+        const mx = (x1 + x2) / 2;
+        const my = (y1 + y2) / 2;
+        // extrude toward the piece's own county
+        const sgn = inParent([mx + nx * 0.05, my + ny * 0.05])
+          ? 1
+          : inParent([mx - nx * 0.05, my - ny * 0.05])
+            ? -1
+            : 0;
+        if (!sgn) continue;
+        const ox = nx * sgn * DEPTH;
+        const oy = ny * sgn * DEPTH;
+        // lengthwise overshoot closes the notches quads leave at joints
+        const e = Math.min(DEPTH, len);
+        out.push({
+          fips: pid,
+          region: r.region,
+          rings: [
+            [
+              [x1 - ux * e, y1 - uy * e],
+              [x2 + ux * e, y2 + uy * e],
+              [x2 + ux * e + ox, y2 + uy * e + oy],
+              [x1 - ux * e + ox, y1 - uy * e + oy],
+            ],
+          ],
+        });
+      }
+    }
+  }
+  return out;
 }
 
 const MAIN = {
@@ -3180,7 +3260,12 @@ const liveUnitIds = (fips) => {
   return s ? s.pieces.map((p) => p.id) : [fips];
 };
 
-function applyPreset(preset) {
+// A preset's partial counties (see presets.js) are claimed by carving them
+// along the given tract GEOIDs — the same engine the freehand knife drives,
+// just told directly which tracts fall inside instead of deriving that from
+// a stroke. Reapplying a preset that already carved a county this way is a
+// no-op there: carveCounty finds nothing left to divide.
+async function applyPreset(preset) {
   if (preset.parts) {
     const sids = preset.parts.map((part) => {
       const sid = createState(part.name);
@@ -3195,9 +3280,43 @@ function applyPreset(preset) {
     scheduleRefresh();
     return;
   }
+
+  const partials = partialCounties(preset);
+  if (partials.length && carving) {
+    mapNote("Still carving — try again in a moment.");
+    return;
+  }
+
   const fipsList = resolvePreset(preset, data.counties);
   const sid = mergeTarget(preset) ?? createState(preset.name);
   for (const fips of fipsList) for (const id of liveUnitIds(fips)) assign.set(id, sid);
+
+  if (partials.length) {
+    carving = true;
+    try {
+      const missing = [];
+      let carvedAny = false;
+      for (const { fips, tracts } of partials) {
+        const payload = await tractFile(fips);
+        if (!payload) {
+          missing.push(data.counties[fips]?.name ?? fips);
+          continue;
+        }
+        const centroids = tractCentroids(fips, payload);
+        const inside = new Set(tracts);
+        if (carveCounty(fips, payload, centroids, inside)) carvedAny = true;
+        const pieces = splits.get(fips)?.pieces ?? [{ id: fips, tracts: new Set(centroids.keys()) }];
+        for (const piece of pieces) {
+          if ([...piece.tracts].every((t) => inside.has(t))) assign.set(piece.id, sid);
+        }
+      }
+      if (carvedAny) rebuildWorld();
+      if (missing.length) mapNote(`No tract data for ${listNames(missing)}.`);
+    } finally {
+      carving = false;
+    }
+  }
+
   touchTerritory();
   recountStates();
   recolorState(sid);
@@ -3615,8 +3734,10 @@ async function importGeoJSON(file) {
     }
     // Project the boundary into map coordinates once; every containment
     // question below is then planar, in the same space as the county parts
-    // and the tract centroids.
-    const regionParts = geoms.flatMap((g) => projectParts(g, {}));
+    // and the tract centroids. Ring winding is normalized first — a
+    // backwards ring would project as everything-but-the-region and paint
+    // the exact inverse of the file.
+    const regionParts = geoms.flatMap((g) => projectParts(rewindGeometry(g), {}));
     if (!regionParts.length) {
       mapNote("That boundary projects to nothing on this map.");
       return;

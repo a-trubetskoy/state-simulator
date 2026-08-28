@@ -18,6 +18,7 @@ import {
   allocatePieces,
   partsContain,
   reclassifyRecords,
+  rewindGeometry,
   splitCountyGeometry,
   tractsAcrossCut,
 } from "../src/split.js";
@@ -160,14 +161,17 @@ const makeOpts = (splits) => {
   for (const [pid, s] of splits) for (const p of s.pieces) pieceParent.set(p.id, pid);
   return {
     ownerAt: (pt, r) => {
+      let inFringe = false;
       for (const id of r.a === r.b ? [r.a] : [r.a, r.b]) {
         const s = splits.get(id);
         if (!s) continue;
         const c = s.contains.get(r.region);
         if (!c || !c.parent(pt)) continue;
         for (const [pid, inPiece] of c.pieces) if (inPiece(pt)) return pid;
-        return s.backingId;
+        inFringe = true; // between the true unions and the drawn line: probe deeper
+        break;
       }
+      if (inFringe) return null;
       const aSplit = splits.has(r.a);
       const bSplit = splits.has(r.b);
       if (aSplit && bSplit) return null;
@@ -199,7 +203,10 @@ const wmhi = (rowA.mhi * rowA.pop + rowB.mhi * rowB.pop) / county.pop;
 check(Math.abs(wmhi - county.mhi) / county.mhi < 0.01, `mhi: weighted mean of pieces ≈ county median (${Math.round(wmhi)} vs ${county.mhi})`);
 check(rowA.mhi !== rowB.mhi, `mhi differs between pieces (${rowA.mhi} vs ${rowB.mhi})`);
 
-check(geo2.renderParts.length > parentParts.length, `renderParts: backing plus the piece (${geo2.renderParts.length} parts)`);
+check(
+  geo2.backingParts.length === parentParts.length && geo2.pieceParts.length > 0,
+  `fill parts: parent-shaped backing (${geo2.backingParts.length}) plus the piece's union (${geo2.pieceParts.length})`
+);
 check(
   geo2.hoverParts.get(FIPS + "a").length > 0 && geo2.hoverParts.get(FIPS + "b").length > 0,
   `hover parts for both pieces (${geo2.hoverParts.get(FIPS + "a").length} / ${geo2.hoverParts.get(FIPS + "b").length})`
@@ -346,6 +353,84 @@ check([...kern4].every((id) => ids4.has(id)) && kern4.size >= 1, `Kern County li
     `adjacent carves: shared border re-owns into ${sequence.join(" → ")}`
   );
   check(segs(runs) === border.path.length - 1, "adjacent carves: border segments preserved");
+}
+
+// --- the fringe: true unions stopping short of the drawn line --------------
+// The piece unions sit 0.1 inside the drawn county, so shallow probes land
+// in the fringe. The deep steps must own each stretch by the piece BEYOND
+// the fringe — under the old backing fallback the whole border would have
+// read as the backing piece, drawing a phantom state border along its
+// upper half.
+
+{
+  const rect = (x0, y0, x1, y1) =>
+    partsContain([{ rings: [[[x0, y0], [x1, y0], [x1, y1], [x0, y1]]] }]);
+  const synth = new Map([
+    [
+      "X",
+      {
+        pieces: [{ id: "Xlo" }, { id: "Xhi" }],
+        backingId: "Xlo",
+        contains: new Map([
+          [
+            "main",
+            {
+              parent: rect(0, 0, 1, 1),
+              pieces: new Map([
+                ["Xlo", rect(0.1, 0, 0.9, 0.5)],
+                ["Xhi", rect(0.1, 0.5, 0.9, 1)],
+              ]),
+            },
+          ],
+        ]),
+      },
+    ],
+  ]);
+  const border = {
+    a: "X",
+    b: "06059",
+    arc: 0,
+    region: "main",
+    path: d3.range(0, 1.0001, 0.05).map((y) => [1, y]),
+  };
+  const runs = reclassifyRecords([border], makeOpts(synth));
+  const sequence = runs.map((r) => `${r.a}|${r.b}`);
+  check(
+    sequence.join(" → ") === "Xlo|06059 → Xhi|06059",
+    `fringe: deep probes own the border by the pieces beyond it (${sequence.join(" → ")})`
+  );
+  check(segs(runs) === border.path.length - 1, "fringe: border segments preserved");
+}
+
+// --- imported boundaries: ring winding normalized before projection --------
+// A GeoJSON region wound the wrong way for a spherical renderer reads as
+// everything-but-the-region; rewindGeometry must make both windings land on
+// the same (small) area, and containment must agree after projection.
+
+{
+  const square = [
+    [-118.5, 34.0],
+    [-118.0, 34.0],
+    [-118.0, 34.5],
+    [-118.5, 34.5],
+    [-118.5, 34.0],
+  ];
+  const asRegion = (ring) => {
+    const g = rewindGeometry({ type: "Polygon", coordinates: [ring.map((p) => p.slice())] });
+    return { area: d3.geoArea(g), contains: partsContain(projectParts(g, {})) };
+  };
+  const ccw = asRegion(square);
+  const cw = asRegion(square.slice().reverse());
+  check(
+    ccw.area < 2 * Math.PI && Math.abs(ccw.area - cw.area) < 1e-12,
+    "GeoJSON winding: both windings normalize to the same small region"
+  );
+  const inPt = projection([-118.25, 34.25]);
+  const outPt = projection([-90, 40]);
+  check(
+    ccw.contains(inPt) && cw.contains(inPt) && !ccw.contains(outPt) && !cw.contains(outPt),
+    "GeoJSON winding: containment agrees for both windings after projection"
+  );
 }
 
 // --- the knife: drawn lines translate into tracts on either side ----------

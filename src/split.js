@@ -170,6 +170,26 @@ export function tractsAcrossCut(points, centroids, bounds) {
   return inside;
 }
 
+// Normalize an imported polygon's ring winding in place. GeoJSON in the
+// wild arrives in either convention (RFC 7946's counterclockwise exteriors,
+// shapefile-style clockwise, hand-drawn anything), but a spherical renderer
+// reads a backwards ring as everything-but-the-ring — the whole globe minus
+// the region, which would paint the exact inverse of the boundary. Rewind
+// every ring to what its role demands: an exterior ring encloses less than
+// a hemisphere, a hole more. (The build applies the same rule to the map's
+// own topology; see rewindRings in scripts/geo-lib.mjs.)
+export function rewindGeometry(geometry) {
+  const polys = geometry.type === "Polygon" ? [geometry.coordinates] : geometry.coordinates;
+  for (const rings of polys) {
+    rings.forEach((ring, ri) => {
+      const area = d3.geoArea({ type: "Polygon", coordinates: [ring] });
+      const backwards = ri === 0 ? area > 2 * Math.PI : area < 2 * Math.PI;
+      if (backwards) ring.reverse();
+    });
+  }
+  return geometry;
+}
+
 // Spherical polygon area that tolerates a stray backwards ring: no tract
 // union comes near a hemisphere, so any ring measuring bigger than one is
 // read as its complement.
@@ -202,10 +222,12 @@ export const partsContain = (parts) => (pt) => {
 };
 
 // The whole geometric side of one carved county's current partition:
-//   renderParts — what the county fill layers draw in the parent's place:
-//     the parent-shaped backing owned by the backing piece first, the other
-//     pieces' tract unions over it (the caller puts these ahead of every
-//     base county part, so neighbours clip the fringe)
+//   backingParts / pieceParts — what the county fill layers draw in the
+//     parent's place: the parent-shaped backing owned by the backing piece,
+//     and the other pieces' tract unions. The caller draws backings first,
+//     then the fringe ribbons it builds from the re-owned boundary records,
+//     then the unions, all ahead of every base county part so neighbours
+//     clip whatever pokes past the drawn line
 //   hoverParts — every piece's own tract-union parts, keyed by piece id, for
 //     the hover tint and the symbol centroids (the backing shape can't
 //     serve: it spans the whole county)
@@ -234,15 +256,16 @@ export function splitCountyGeometry({
   const areaTotal = areas.reduce((a, b) => a + b, 0) || 1;
   const landShares = new Map(pieces.map((p, i) => [p.id, areas[i] / areaTotal]));
 
-  const renderParts = [];
+  const backingParts = [];
+  const pieceParts = [];
   const hoverParts = new Map(pieces.map((p) => [p.id, []]));
   const contains = new Map();
   for (const [region, parts] of parentPartsByRegion) {
-    renderParts.push(...parts.map((p) => ({ fips: backingId, region, rings: p.rings })));
+    backingParts.push(...parts.map((p) => ({ fips: backingId, region, rings: p.rings })));
     const pieceFns = new Map();
     pieces.forEach((piece, i) => {
       const unionParts = projectParts(unions[i], { fips: piece.id, region }, region);
-      if (piece.id !== backingId) renderParts.push(...unionParts);
+      if (piece.id !== backingId) pieceParts.push(...unionParts);
       hoverParts.get(piece.id).push(...unionParts);
       pieceFns.set(piece.id, partsContain(unionParts));
     });
@@ -283,7 +306,7 @@ export function splitCountyGeometry({
     }
   }
 
-  return { renderParts, hoverParts, dividerRecords, contains, landShares };
+  return { backingParts, pieceParts, hoverParts, dividerRecords, contains, landShares };
 }
 
 // Decode a set of topology arcs into coordinate lines. (topojson-client's
@@ -304,13 +327,22 @@ function mergeArcsToLines(topo, geometry) {
 // the band, and painting agreeing with the fills to the pixel.
 //
 // opts.ownerAt(pt, record) — the unit at pt among the record's sides, or
-//   null when pt falls outside every carved parent there (both sides carved
-//   and the probe missed, or past the map edge).
+//   null when the point settles nothing: outside every carved parent there,
+//   or inside one but in the FRINGE between its true tract unions and its
+//   drawn outline. Returning null for the fringe is what sends the ladder
+//   to its deeper steps, so a stretch is owned by the piece whose territory
+//   actually lies beyond the fringe — not by whichever piece wears the
+//   backing — and two same-state pieces meeting across a county line never
+//   read as a border.
 // opts.defaultsFor(record) — [fallbackA, fallbackB]: each side resolved to
 //   its backing piece (or itself), for stretches no probe could classify.
 // opts.familyOf(id) — a piece's parent county (or the id itself), so a
 //   default can be told apart from a resolved piece of the same county.
-const PROBE_STEPS = [0.03, 0.08, 0.2];
+//
+// The shallow steps read the sliver-thin cases; the deep ones (up to ~4 km
+// of ground) exist to see past the drawn-versus-true fringe, whose width is
+// bounded by the map's simplification tolerance.
+const PROBE_STEPS = [0.03, 0.08, 0.2, 0.45, 0.9];
 
 export function reclassifyRecords(records, { ownerAt, defaultsFor, familyOf }) {
   const out = [];

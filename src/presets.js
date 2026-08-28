@@ -9,6 +9,13 @@
 // ambiguous or misleading out of context (e.g. disambiguating from another
 // preset, or when the preset merges into an existing state).
 //
+// A `counties` entry is normally a FIPS string (the whole county). It can
+// instead be `{ fips, tracts }` for a county the preset only partly claims —
+// the same shape "Copy JSON" exports for a carved piece. Applying the preset
+// carves that county along the given tract GEOIDs (same engine as the
+// freehand knife) and claims only the piece they fall in; the rest of the
+// county keeps whatever state it already had.
+//
 // A preset that splits a place into several states at once (e.g. a "Six
 // Californias"-style proposal) uses `parts` instead of `counties`/`states`:
 // an array of `{ name, counties }`, one per resulting state. It shows up as
@@ -478,10 +485,12 @@ export const PRESETS = [
       "47001", "47007", "47009", "47011", "47013", "47019", "47025", "47029",
       "47035", "47057", "47059", "47063", "47065", "47067", "47073", "47089",
       "47091", "47093", "47105", "47107", "47115", "47121", "47123", "47129",
-      "47139", "47143", "47145", "47151", "47155", "47163", "47171", "47173", "47179",
+      "47139", "47143", "47145", "47151", "47153", "47155", "47163", "47171",
+      "47173", "47179",
       // North Alabama hill country
-      "01133", "01127", "01093", "01057", "01059", "01079", "01103", "01009",
-      "01043", "01049", "01071", "01095", "01055", "01115",
+      "01009", "01033", "01043", "01049", "01057", "01059", "01071", "01075",
+      "01077", "01079", "01083", "01089", "01093", "01095", "01103", "01127",
+      "01133",
     ],
   },
   {
@@ -902,17 +911,33 @@ export const PRESETS = [
 
   {
     id: "delta-ar-ms",
-    name: "The Delta",
+    name: "Delta",
     label: "Delta (AR + MS Delta)",
-    desc: "The Arkansas Delta (15 counties, in full) plus the Mississippi Delta (19 counties, several of which are only partially in the alluvial plain — approximated here as whole counties)",
+    desc: "The Arkansas Delta plus the Mississippi Delta, carved along census tract lines where the alluvial plain cuts through a county",
     counties: [
       // Arkansas Delta
-      "05001", "05017", "05021", "05031", "05035", "05037", "05041", "05043",
-      "05055", "05077", "05093", "05095", "05107", "05111", "05123",
+      "05001", "05017", "05021", "05031", "05035", "05037", "05041", "05055",
+      { fips: "05067", tracts: ["05067480100", "05067480200", "05067480300", "05067480401", "05067480402"] },
+      { fips: "05069", tracts: ["05069000102", "05069002300", "05069002500"] },
+      { fips: "05075", tracts: ["05075470100", "05075470400", "05075470501", "05075470502"] },
+      "05077",
+      { fips: "05079", tracts: ["05079960600"] },
+      { fips: "05085", tracts: ["05085020400", "05085020500", "05085020600", "05085020700", "05085020800"] },
+      "05093", "05095", "05107", "05111",
+      { fips: "05117", tracts: ["05117460200", "05117460300"] },
+      { fips: "05119", tracts: ["05119003900"] },
+      { fips: "05121", tracts: ["05121960100", "05121960302"] },
+      "05123", "05147",
       // Mississippi Delta
-      "28151", "28033", "28053", "28015", "28055", "28107", "28119", "28011",
-      "28027", "28083", "28133", "28125", "28137", "28143", "28135", "28051",
-      "28163", "28043", "28149",
+      "28011", "28027",
+      { fips: "28033", tracts: ["28033070101"] },
+      { fips: "28051", tracts: ["28051950300"] },
+      "28053", "28055", "28083", "28119", "28125", "28133",
+      { fips: "28135", tracts: ["28135950300", "28135950400"] },
+      "28143",
+      { fips: "28149", tracts: ["28149950101"] },
+      "28151",
+      { fips: "28163", tracts: ["28163950400"] },
     ],
   },
   {
@@ -984,8 +1009,10 @@ export const PRESETS = [
   },
 ];
 
+// The preset's whole counties, by FIPS. Partial counties (see
+// partialCounties) are carved separately, so they're left out here.
 export function resolvePreset(preset, countiesById) {
-  const set = new Set(preset.counties ?? []);
+  const set = new Set((preset.counties ?? []).filter((c) => typeof c === "string"));
   if (preset.states) {
     for (const [fips, c] of Object.entries(countiesById)) {
       if (preset.states.includes(c.st)) set.add(fips);
@@ -993,4 +1020,10 @@ export function resolvePreset(preset, countiesById) {
   }
   for (const fips of preset.exclude ?? []) set.delete(fips);
   return [...set];
+}
+
+// The preset's partial counties: { fips, tracts } entries naming the tract
+// GEOIDs the preset claims out of that county.
+export function partialCounties(preset) {
+  return (preset.counties ?? []).filter((c) => typeof c !== "string");
 }

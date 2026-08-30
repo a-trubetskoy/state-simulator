@@ -1,0 +1,1018 @@
+GLOBE REWRITE - PLANNING NOTES
+==============================
+
+Status: C0-C7 built.
+C2 was checked on the target integrated GPU: frame rate holds with every
+layer on and units tinted, and the three visible issues found there are
+fixed (see C2).
+C3 is settled.
+C4 was checked; see the end of C4 for the two problems that turned up.
+C5 (labels) has only been checked in node — not yet looked at on screen
+(see the decision point at the end).
+C6 (the carve model) is checked in node (npm run check:carve, 67
+assertions) but not yet looked at on screen either.
+C7 is the app itself and has not been looked at at all. The renderer is on
+`/`; the old deck.gl map is available at `/?deck` for comparison.
+C8 is next.
+
+Problem
+-------
+This problem describes the old app (still true on /?deck; fixed on / by C7).
+
+Rotation is the only camera change that moves vertices instead of the camera.
+Pan and zoom push a new viewState and the GPU redraws the whole stack at 60fps
+(src/main.js, the zoom handler). Rotation re-projects every coordinate on the
+CPU through d3-geo, ~130ms, so a drag shows a coarse preview and the real map
+arrives on release.
+
+Fix: put the geometry in 3D on a unit sphere, upload it once, make the rotation
+a mat3 uniform. Rotation then costs what panning costs.
+
+This is a renderer rewrite. The data pipeline, the stats, the ranking and the
+presets are untouched.
+
+One exception: C6 changes what carving means (see C6).
+
+Facts we are working from
+--------------------------
+Geometry (counted from public/data/ at C7):
+  counties topo   159,248 pts   17,075 arcs   3,504 units
+  boundary runs    89,942 pts    7,242 runs
+  world land      202,276 pts    4,792 arcs   213 land, 1,355 lakes
+  overlay lakes    12,136 pts
+  border seams      1,130 pts      133 runs
+  total            ~465,000 unique points, ~5.8 MB of JSON
+
+  build-world.mjs ships Natural Earth's lakes at full detail, because the
+  globe draws them over the map to cover the Census lake shoreline
+  (generalized at 1.6 km, which facets past ~4x zoom). This also let the
+  map's own over-lake layer be dropped entirely. The lakes are now the
+  largest single thing in the compiled buffer, bigger than the counties.
+
+Scale:
+  GLOBE_SCALE = 1348.9 px (sphere radius at zoom 1)
+  disc is 2698 px across at zoom 1
+  4.72 km/px at zoom 1, 295 m/px at max zoom
+  max zoom is a d3 scale factor of 16 (src/main.js, zoom.scaleExtent), which
+  lands around deck zoom 4-6 (src/main.js, viewState). Not a tile zoom of 16.
+  C7 feeds that same k straight to the camera; see the bridge note there.
+
+Consequences of those numbers:
+  - 325k points is one static mesh. No tiling, no LOD, no streaming.
+  - float32 is not marginal. Design-box coords are ~10^3, one ulp is ~6e-5,
+    camera multiplies by 16 -> ~1e-3 px of error.
+  - chord sag L^2/8R stays under one pixel up to ~120 km edges at max zoom.
+    County arcs, boundary runs and the 6 km world data are all far denser.
+    Only the graticule and any long straight segments need subdividing.
+  - the GPU already draws this whole stack every pan frame. Load is known-good.
+
+Out of scope
+------------
+  - The AK/HI insets. Separate Deck, separate canvas, fixed camera, Albers
+    (src/main.js, PROJ.ak/PROJ.hi), baked once at startup. They do not turn.
+    They keep the current CPU path and deck.gl unchanged, and after C7 they are
+    the only thing left on it.
+  - build-data.mjs / build-tracts.mjs / build-world.mjs. They keep producing
+    what they produce; a new compile step runs after them.
+  - Anything the map shows. This is a how-it-draws change, not a what-it-shows
+    change.
+
+Chunks
+------
+
+C0. Spike                                                          [DONE, GO]
+  Prove the core loop before writing anything else.
+  Static sphere + county hairlines only, rotating at 60fps on integrated
+  graphics, at max zoom.
+  Deliverable: a throwaway page, a frame-time number, a go/no-go.
+  Kill criterion: if 1px lines over ~320k segments will not hold 60fps on the
+  weakest target machine, stop here.
+
+  Built as:
+    spike/build-geometry.mjs   compiles the shipped JSON to unit-sphere xyz
+    spike/spike.js             WebGL2, instanced hairlines, rotation as a mat3
+    spike.html                 the page and its readouts
+    npm run spike:data, then /spike.html on the dev server
+
+  Segments drawn (plan estimated ~320k):
+    counties  142,212   boundary 76,488   world 66,262   graticule 10,768
+    total     295,730 in 6.8 MB, one static upload
+
+  The rotation matrix reproduces d3.geoOrthographic to 1e-16, so the spike
+  measures the real view rather than an approximation. GLOBE_SCALE comes out
+  1348.9 px from the same fit, unchanged.
+
+  Result, integrated graphics (no discrete GPU), 75Hz so a 13.3ms budget:
+
+    full stack        5.00 ms   295,730 segments   2.7x headroom
+      counties        1.67 ms   142,212
+      boundary        1.67 ms    76,488
+      world           1.25 ms    66,262
+      graticule       0.42 ms    10,768
+    vertex floor      3.34 ms   same geometry, zero-area quads
+
+  Measured by climbing the pass count past vsync and sampling again at double,
+  so the slope is one pass and the fixed overhead cancels. Warm; cold is ~2x
+  worse until the clocks ramp.
+
+    - 67% of the cost is vertex work. Shader tuning is spent; the only lever
+      left is fewer segments. topojson-simplify is already a devDependency,
+      and at the home view the county data is finer than 1348px of sphere can
+      resolve. A coarse level should roughly halve the floor. Banked against
+      C3 rather than spent now.
+    - fragments are only 1.66ms of the 5. C3's fills, band, halo and aprons
+      are fragment work, so they land in the half of the budget that is free.
+    - it replaces a 130ms CPU re-projection, so rotation now costs what
+      panning costs, which was the premise.
+
+  Three fixes took the frame time from 10.00ms to 5.00ms. Carried into C2
+  verbatim, since two of them are easy to get wrong again:
+
+    - extend a segment's quad along its own direction by halfWidth, NOT by
+      halfWidth + feather. County arcs average ~2 device px at the home view,
+      so the wrong version drew an 8px quad for a 2px line: 6.66ms -> 1.67ms
+      on counties.
+    - the antialiasing ramp is ONE DEVICE pixel. Scaling it by dpr makes every
+      quad 6 device px wide to draw a 2px stroke.
+    - collapse back-hemisphere quads in the vertex shader, rather than
+      discarding them in the fragment shader, which still pays to rasterize
+      them first. (The deck.gl path never draws this geometry at all — d3
+      clips it on the CPU.)
+
+  Not answered by C0, deliberately: line joins at corners (C0 uses square
+  caps; the kill criterion is about frame time, not looks).
+
+C1. Geometry compiler                                                  [DONE]
+  New build script. Reads the existing topojson, writes binary buffers.
+  Depends on: nothing.
+
+  Built as:
+    scripts/build-geometry.mjs        npm run data:geometry, ~1.5s, offline
+    public/data/globe-geometry.bin    the buffers
+    public/data/globe-geometry.json   the manifest
+  Both outputs are gitignored: they rebuild in seconds from the committed JSON
+  and nothing loads them yet. Track them at C8.
+
+  What it emits (triangles, not vertices, in the per-group breakdowns):
+    fills   598,409 vertices, 644,652 triangles, indexed, unit-sphere float32
+              worldLand 229,458  counties 195,950  worldLakes 139,388
+              nation 72,543      lakesUnder 5,269  aprons 2,044
+    lines   445,433 segments, start/end pairs, one instance each
+              worldLakeEdges 142,614  countyArcs 142,047  coast 79,200
+              worldCoast 49,316       worldBorders 12,445 graticule 10,768
+              lakeEdgesUnder 4,618    lakeshore 3,373     seams 1,004
+              border 48
+    plus a uint16 unit id per fill vertex, a unit id per line SIDE, and
+    per-unit vertex/index ranges into the county fills for C6 to patch.
+
+  lakesOver and lakeEdgesOver (the map's own lakes drawn over the county
+  fills) are gone: Natural Earth's lakes, at full detail and drawn last, do
+  that job and also cover the Census shoreline (see layers.js). One layer now
+  does what two did — worldLakes and worldLakeEdges are 44% of everything in
+  the file, so that's where the size is, not the counties.
+
+  Six things settled that C2 and C3 inherit:
+
+    - every line instance carries the unit on its left and the unit on its
+      right. That pair is what says whether a line is a border and whose
+      colour goes on which side. Two sentinels: UNIT_OUTSIDE (0xffff) beyond
+      the map's units, UNIT_NONE (0xfffe) not a unit boundary at all. Exactly
+      one side outside means a map-edge run; a single-user county arc keeps
+      the same unit on both sides, which is how ARC_RECORDS marked the
+      nation's edge, so the grey line and the band stay off it. The old
+      edge/isBorder/foreignBorder/bandFilter tests all fall out of the pair.
+      The sides come from ring winding, cross-checked by 225 geometric probes.
+    - the coast halo is not a mesh. It's the coast group drawn a second time
+      at width 16.
+    - the aprons are real triangles, 6 km on the ground, shipped unclipped.
+      Clip them to the nation mesh with a stencil pass — cheaper and more
+      exact than a build-time boolean, and the nation mesh is already there
+      as the white backing.
+    - the antimeridian stops existing. Rings are unwrapped in longitude
+      before triangulation, so a country straddling 180 is ordinary in a
+      shifted frame. One ring wraps a full 360 and needs the pole: Antarctica,
+      closed down two meridians and across the pole, where the pole edge has
+      no length.
+    - fill triangles need their interior edges refined too, not just their
+      outlines. The outline doesn't need it (two triangles sharing a chord
+      tile the quad it cuts). The horizon does: the renderer clips a triangle
+      along the plane through the sphere's centre, and that cut follows the
+      chord. 171,776 of the 505,428 triangles came from this when measured
+      (totals have since moved; the ratio hasn't been re-run). The cost is
+      inherent — a landmass has no interior vertices, so tiling Russia or
+      Australia at 120 km has to invent them. Exempt: the white nation
+      backing, which every county fill covers, so an unrefined chord there
+      just pulls it in behind a county.
+    - two source rings cross themselves after simplification and earcut
+      fills the knot instead of the shape (CA-2401 by 12.3%, CA-4712 by
+      1.6%). Not a regression: SolidPolygonLayer runs the same earcut on the
+      same rings today. Everything else is within 2.6e-3% of d3.geoArea in
+      aggregate.
+
+  Open: SIZE. 27.3 MB, 17.3 MB gzipped, against ~5.8 MB of JSON today. It
+  buys away the JSON parse and the 130 ms re-projection.
+
+  Not a problem while only the harness loaded it, but C7 put it in front of
+  the app, so it's now the first thing between a cold visitor and any map at
+  all. Five levers on the size:
+    - the world lakes (above, 44% of the file) are only at full detail
+      because ~20 of them are near the map's units. The other 1,330 are
+      scenery on other continents and can be thinned like the land around
+      them.
+    - topojson-simplify at a coarse level. Already banked against C3 for
+      frame time; cuts size in the same proportion, roughly half. The world
+      layer is the obvious candidate: build-world.mjs thins Natural Earth 10m
+      to 6 km (median segment 11.2 km = 2.4 px at the home view), finer than
+      1348 px of sphere can show. Worth doing for size and frame time; not a
+      fix for anything that looks wrong (the ragged shoreline C2 found was a
+      cap-shape bug, not a segment-length one).
+    - lines are stored as explicit start/end pairs, duplicating every
+      interior point (7.1 MB of the 20.2 as first measured; more now with
+      the lake edges). A shared point strip with a per-instance valid flag,
+      as deck.gl's PathLayer does it, would save ~2.9 MB. Kept as pairs here
+      so C2 can lift C0's shader verbatim.
+    - the nation backing may not be needed at all (1.6 MB): county fills
+      cover it exactly, and its other job — masking the aprons — is a
+      stencil pass off the same mesh. A C3 question, once the stack is side
+      by side.
+    - encoding, the largest and only free lever. float32 coordinates barely
+      compress (gzip takes 38% off, vs. 71% for the source topojson, which
+      quantizes to integers and delta-encodes along each ring). Storing
+      quantized lon/lat and expanding to xyz on load costs no fidelity.
+      Byte-planing alone, no format change: 12.9 -> 9.4 MB (measured).
+
+  Also worth doing, unrelated to size: the whole buffer currently blocks
+  first paint — after C7 that's the app's first paint, not a harness's. The
+  sphere and graticule are generated rather than loaded, and the manifest
+  already carries byte offsets, so drawing those and then world land first
+  would put a turning globe up immediately. C8.
+
+  Deliberately not emitted, though C4 and C5 want them: per-unit spherical
+  centroids and bounding boxes (computeCountyGeo's job today, in projected
+  coordinates), and anything for the AK/HI insets, which keep the CPU path.
+  C7 derives centroids at load from the compiled county triangles,
+  area-weighted, instead — a dozen lines in map.js against a build change and
+  a bigger file. Bounding boxes never found a caller.
+
+C2. Renderer core                                          [BUILT, LOOKED AT]
+  WebGL2. Either raw or a thin wrapper. The scene is roughly one draw call per
+  layer, so a full scene graph library is not obviously worth it.
+  Depends on: C1.
+
+  Pieces:
+    - fill shader
+    - instanced line shader with screen-space width, caps and joins
+    - ribbon shader (may just be the fill shader)
+    - camera: orthographic. Rotation is a mat3 uniform. Pan and zoom stay a 2D
+      screen transform, as they are today.
+    - horizon: discard fragments where the rotated position has z < 0. This
+      replaces d3-geo's clipping.
+    - no depth buffer. Draw order is painter's order, same as now.
+
+  Built as:
+    src/globe/{shaders,camera,geometry,layers,renderer}.js
+    globe.html + src/globe/dev.js    harness, /globe.html on the dev server
+  20 layers in painter's order. Horizon is one line in the fill shader. Aprons
+  are stencil-clipped to the nation mesh. The band extrudes line instances to
+  one side off the left/right unit pair, as C1 set up.
+
+  The shaders compile and the scene draws. The band lands on the correct
+  side: verified in Node by pushing a sample of every band group one km to
+  the side BAND_VS picks — it lands inside the owning unit 85-99% of the
+  time, against 0-10% for the flipped sign (the residual is a one km probe
+  against a generalized, four-decimal shoreline, not a side error).
+
+  Line joins at corners were the risk this plan called out, and two separate
+  things go wrong there:
+
+    - overlap along a run: caps overlap by a stroke width however short the
+      segment is, so a 50% line reads 68% at the home view and 51% at 16x,
+      and county borders fade as you zoom. Tried a coverage buffer (draw the
+      group into R8 with MAX blending, composite once) — slower and worse to
+      look at on the target integrated GPU, so it's deleted. The fade is the
+      price; it's a shade of white on a hairline and the shipped deck.gl map
+      carries the same hairlines at the same alpha. If it ever matters, the
+      fix is a shared point strip with adjacency, which C1 wants anyway to
+      save 2.9 MB.
+    - the shape of the corner: a square cap's corner reaches sqrt(2) half
+      widths from the vertex rather than one, 41% of the half width at every
+      turn. On a 1px hairline that's 0.2px (below the threshold that made
+      the first pass look settled). On the 16px coast halo it's 3.3px, and
+      the world coastline turns by more than 90° at a quarter of its
+      vertices (median segment 11.2 km = 2.4 px at the home view) — visibly
+      spiky, ragged.
+
+  Fixed by measuring to the segment instead of to its centreline in LINE_FS,
+  which rounds both the cap and the join (two capsules sharing an endpoint
+  union into exactly the round-jointed stroke). No adjacency needed, half a
+  feather of extra quad length. Checked against the exact stroke in Node:
+  3.23 px of overshoot before, 0.00 px after, no holes either way. This also
+  matches parity — every PathLayer in main.js sets jointRounded and
+  capRounded.
+
+  The band was rebuilt. C1 and C2 both originally modeled it as a ribbon
+  extruded off each border segment, using the line instance's left/right
+  unit pair. That's wrong: a quad thrown off one segment knows nothing about
+  where the unit goes at the next vertex, so wherever the border bends away
+  by more than a right angle the quad covers ground the unit doesn't own.
+  Measured on the coast runs, the ribbon's outer corner lands in the sea at
+  35% of segments at the home view, 31% at 4x, 27% at 16x — doesn't improve
+  with zoom, since the band is a fixed pixel width and a coastline is about
+  as rough at one scale as the next.
+
+  main.js never had this bug: its band is the county fill drawn again in the
+  deeper colour, clipped to a mask, so it's the state's own ground by
+  construction and can't spill across a border. The renderer now does the
+  same thing with the stencil: stroke the borders into one bit with the
+  colour mask off, then draw the county fill group a second time through it
+  in the band palette. Pixel width kept, spill made structurally impossible,
+  and the separate band program is deleted — the line and fill programs
+  already do both halves.
+
+  Two things that follow:
+    - there are two palettes now, same layout: the fill a unit wears and the
+      deeper colour its band wears. The band pass is the fill program
+      reading the second one.
+    - the stencil holds two masks, a bit each: 0x01 the nation (for the seam
+      aprons), 0x02 the band.
+
+  Lesson for future line/ribbon work: a screen-space extrusion off one
+  segment is only correct where the geometry is smooth at the scale of the
+  stroke. Square caps and the extruded band were the same mistake at two
+  widths.
+
+C3. Styling parity                                            [BUILT, UNSEEN]
+  Reproduce what is on screen today, layer for layer.
+  Depends on: C2.
+
+  Never had a chunk of its own in the end. Its four parity errors were found
+  and fixed inside C2's placeholder table; the rest (the palette, the
+  atlas/data switching, the dimmed and highlighted variants) couldn't be
+  built against a harness with no states, so it landed in C7 with the app
+  behind it. layers.js is the deliverable and is written to be read as one.
+
+  Four parity errors found and fixed in the C2 placeholder table:
+    - world land wore main.js's LAND (the dark border line beyond the map's
+      units) instead of WORLD_LAND (the tan a non-union unit wears) — every
+      continent outside North America came out as a slate-grey void. The
+      border line then wore the coast blue instead of the dark colour. Both
+      were one wrong constant; COLORS is now named for what each entry
+      paints rather than for the constant it came from.
+    - the lakeshore runs weren't drawn at all. main.js draws the map's outer
+      edge as coast plus lakeshore in one blue line, and only the coast half
+      gets the halo, so the Great Lakes shoreline had no line on it.
+    - the over-lake edges were the lake blue at 2px; they're the coast blue
+      at 1.1px, matching the lakeshore treatment they're meant to be
+      indistinguishable from.
+    - the sphere was #eaf3f9 against OCEAN's #e8f1f7.
+
+  Still open, and not a wrong constant: main.js draws the under-lake edges in
+  ground units, so they scale with zoom. The globe renderer has pixel widths
+  only. Either give the line shader a ground-width mode or accept the
+  difference — it exists to close generalization slivers under the white
+  backing, so pixels may well be fine.
+
+  Palette texture: unit id -> RGBA. County fill, band colour, and the dimmed
+  and highlighted variants. Painting a county becomes one texel write
+  instead of re-uploading a colour attribute. Same for hover tint and
+  selection.
+
+  Built at C7 as TWO textures, not one: the palette above answers a
+  one-unit question, but a state border, the band and the selection
+  outline all ask about the two units a segment separates. See C7 for the
+  second table.
+
+  Layer list to match (main.js buildLayers, `mapLayers`), against C7's
+  layers.js:
+    sphere, graticule                                     — same, globe mode only
+    world: coast halo, land, borders, lakes, lake edges, coast line
+                                                          — same, except the
+      lakes and their edges are drawn once, last, over the map instead of
+      twice (the same change that dropped lakesOver from C1's output).
+    map: lakes under, coast halo, nation backing, seam aprons, counties,
+         band, map lines, lakes over, lake edges, coast line, border line
+                                                          — same, minus the
+      two lakes-over layers, now covered by the world lakes above.
+    data view symbols                                     — moved to the
+      overlay SVG (#data-marks): the one piece of map content placed from a
+      projected centroid rather than drawn from the sphere.
+    selection casing and outline                          — same, drawn
+      inside the cached scene rather than over it; see C7.
+
+  Atlas/data view switching is now a palette swap plus visibility flags:
+  three flags on the layer table (globeOnly, hideInData, dataColor) and one
+  repaint of the palette.
+
+C4. Picking and hover                                      [BUILT, LOOKED AT]
+  Depends on: C2.
+  Ray-sphere intersection gives lon/lat from a mouse position analytically.
+  Then a bbox index (R-tree or a simple lat/lon grid) over units, then
+  point-in-polygon against the source rings.
+  Replaces GPU colour picking and removes the readback stall that currently
+  forces picking to pause during gestures (src/main.js, `gesturing`).
+  Also replaces carveIndex, which works in plane coordinates today.
+
+  Built as:
+    camera.unproject()          the closed-form inverse
+    src/globe/pick.js           the lon/lat index. at(lon, lat) and nothing else
+    src/globe/source.js         the source rings, decoded from the shipped topojson
+    scripts/pick-check.mjs      npm run check:pick
+    the scene framebuffer, PRESENT_VS/FS, camera.view.version
+                                so a hover does not redraw the map. See below.
+  Both halves are pure maths over data the app already has, so both are
+  checked in node rather than by moving a mouse. No new build step and no new
+  data: the index reads na-counties-topo.json, which the app loads anyway,
+  and the manifest's `units` list ties a ring to the id the palette is keyed
+  by.
+
+  Measured: 0.5 us per pick, 14 ms to build the index (3,504 units, 9,885
+  polygons, 45k entries over a half-degree grid) — four orders of magnitude
+  under a frame, so a pointermove-driven pick (including mid-drag) has no
+  reason to pause.
+
+  Four things settled:
+
+    - unproject is exact, measured in screen space rather than ground
+      distance (the projection is singular at the limb, so a ground-distance
+      error blows up there for reasons unrelated to the code). Round-tripping
+      through d3.geoOrthographic is 1.7e-10 px anywhere on the disc, and
+      8e-8 m on the ground once clear of the outer 2%.
+    - the camera keeps two copies of the rotation. Reading the uniform's
+      Float32Array on the CPU put the inverse 1.5e-6 out — 0.03 px at
+      maximum zoom, invisible, but a hundred times what the forward matrix
+      is held to. A float64 copy costs 36 bytes.
+    - lon/lat containment is planar and d3.geoContains is spherical — not the
+      same test. Over 19k points, the sphere disputes 0.036%, and every one
+      of those sits within 22 m of an edge (about what a great circle
+      departs from a straight lon/lat line across a generalized county
+      edge). Not worth spherical arithmetic.
+    - county rings are coarser than they look — a whole county is often 14
+      vertices. A sampler drawing a point on the chord between two ring
+      vertices landed exactly on an edge about one time in seven (a coin
+      toss between the two tests), which read as a 9.6% disagreement rate
+      that was entirely the sampler.
+
+  Not wired into main.js at C4. carveIndex's callers want a knife stroke in
+  lon/lat, which is C7's job. The index answers "which unit is at this
+  lon/lat" and nothing else; per-unit bbox and single-unit containment tests
+  were written, found unused, and removed.
+
+  C7 wired half of that. pickCounty now asks the index outside an inset box
+  and the inset deck inside one, and the gesture pause is gone — the tint
+  keeps up through a pan and a wheel. carveIndex is still projected, because
+  C7 held carving back entirely; it goes with the rest of the carve path in
+  C8. The bbox and containment tests still have no caller.
+
+  Hover is drawn as the hovered unit's own slice of the county fills,
+  tinted, on top of the finished map — not as a palette write, matching
+  where the deck.gl version landed. First use of C1's per-unit index ranges.
+
+  A fast pick is not a fast hover: picking cost 0.5 us but the tint still
+  trailed the cursor at the North America view (not zoomed in). The pick
+  itself isn't zoom-dependent; how much of the map rasterizes per frame is,
+  and the tint was being composited inside the scene, so every pointer move
+  cost a full redraw of it.
+
+  Fixed the way the deck.gl app avoids it structurally: its hover tint is a
+  layer on a second canvas over the map, so a hover redraws one small
+  overlay (main.js, refreshHoverOnly). The renderer does the same with a
+  framebuffer — the scene draws into a texture, a hover frame copies that
+  texture and draws one county over it. Has to be one context, since a
+  second one couldn't share the 28 MB of buffers. Labels draw inside the
+  cached pass, since they move only when the map moves.
+
+  The copy is a textured quad, not gl.blitFramebuffer: the context is
+  created with alpha: false (canvas is RGB8) while the scene texture is
+  RGBA8, and a blit between incompatible formats is an INVALID_OPERATION
+  that fails silently — black canvas, nothing thrown, only the hover tint
+  drawn straight to the canvas afterward still showing. A fragment shader
+  doing texelFetch(scene, ivec2(gl_FragCoord.xy), 0) has no format rule, no
+  filtering, no half-texel error.
+
+  Anything that moves independently of the map wants to be outside the
+  cached scene — that list grows in C6 and C7 (selection outline, knife
+  line, carve preview). The framebuffer decides this once, rather than per
+  feature.
+
+  Tried and rejected:
+    - a live "pick cost" readout on the panel: pick cost varies two orders of
+      magnitude across the map (northern Canada's long rings hit 90us vs. a
+      0.5us median), so in the worst spot the readout itself was a 45ms
+      stall. scripts/pick-check.mjs already reports the number properly.
+    - deferring the pick to the top of the next frame, as main.js does.
+      main.js needs this because its pick reads a pixel back off the GPU;
+      this pick is sub-microsecond and gains nothing from batching.
+
+C5. Labels                                                             [BUILT]
+  Depends on: C2.
+
+  Decided: run the existing labels.js layout in Mercator instead of the
+  projected plane, and bake the result. Mercator is conformal, so the shape
+  work the layout does (PCA long axis, quadratic baseline, room to either
+  side) operates on undistorted shape. Raw lat/lon would stretch longitude by
+  1/cos(lat) and tilt every long axis.
+
+  Bake per state: baseline as lon/lat points, plus a font size and letter
+  spacing.
+  Per frame: project the baseline, lay glyph quads along it, each rotated to
+  the projected tangent. Vertex shader, no CPU work.
+
+  The layout then depends only on territory, which labels.js already caches
+  against assignVersion. Rotation stops touching labels. Painting still
+  triggers a relayout, same as today.
+
+  Three things to get right:
+    - store the fitted size in ground units (km or radians), not Mercator
+      units. Mercator scale is sec(lat), so a size fitted in frame units
+      comes out 1.18x at 32N, 1.35x at 42N, 3.07x at 71N — Montana would
+      render visibly larger than Arizona for no reason.
+    - glyph foreshortening is a shader uniform, not a pipeline decision.
+      Clamp compression at ~0.5: painted-on through most of the disc, no
+      edge-on slivers at the rim.
+    - step 5 (leader-line labels for states too small for their name) packs
+      against screen-space collisions, so it stays viewer-dependent. Baked,
+      two can overlap near the limb. Either accept it or run a debounced
+      repack for just those.
+
+  Known limit, not a blocker now: Mercator degrades with latitude. California
+  spans 32-42N (~15% more stretch at the top). Alaska spans 51-71N (~2x, so
+  its long axis leans too north-south) — low stakes while its usable label is
+  in the inset box. If the map ever goes beyond North America, keep the
+  shared grid global (cell assignment is topological, and its area
+  comparisons are between neighbours at similar latitudes, so distortion
+  cancels) and move the per-state baseline fit into a frame centred on that
+  state.
+
+  Built as:
+    src/labels.js               two new options, and geometry instead of strings
+    src/globe/label-layout.js   the Mercator frame, the raster, the bake
+    src/globe/atlas.js          the SDF glyph atlas
+    src/globe/labels.js         per-frame placement and the draw
+    shaders.js TEXT_VS/TEXT_FS
+    scripts/label-check.mjs     npm run check:labels
+
+  Measured: 95 ms for the whole continent's layout over a 1637x1881 raster
+  (3.08M cells, against 3.23M for the projected raster today), 51 labels, 8
+  abbreviations, 1 leader. The 95 ms is paid when territory changes, which is
+  what the chunk is for; a turn of the globe costs a few thousand multiplies.
+
+  Six things settled:
+
+    - sec(latitude) correction is the core of this chunk. labels.js gained
+      one option, sizeScale(comp): the size caps go in multiplied by the
+      local Mercator stretch and the fitted size comes back divided by it.
+      Measured over the real map: ground sizes come out 6.2-15.0 map units
+      with it and 8.4-35.2 without, so uncorrected the largest label would be
+      more than double NAME_MAX. The check asserts both numbers.
+    - the raster's scale is a memory decision only, once sizes are
+      converted. At the sphere's own scale Mercator's tail toward the
+      Canadian Arctic takes the grid to 10.4M cells; at half it's 3.08M, a
+      shade under the projected raster's cost today. Every constant in
+      labels.js is in map units and passes through sizeScale, so halving it
+      only changes the allocation.
+    - labels.js now emits baseline points and lets its consumer format them,
+      instead of building "M12.3 45.6L..." strings inline (which no
+      per-frame consumer could use). toSvg builds the string; main.js and
+      the two inset labelers are otherwise untouched.
+    - a leader label is not a second kind of thing. Its text is level in the
+      raster, which on the sphere is the local parallel, so it gets a
+      two-point baseline of its own width and goes through the same placer.
+    - the glyph atlas is a signed distance field, generated at runtime, one
+      cell at a time, on demand. Needed because labels are sized in ground
+      units (a name 10px at the home view is 160px at max zoom, and a bitmap
+      atlas is soft at one end or the other), and because state names are
+      editable (character set not knowable at build time). Uses the same
+      canvas context labels.js measures with, so the width the layout
+      reserved and the width the glyphs take are the same number, kerning
+      included.
+    - the halo is a constant: the SVG labels wear a white stroke under the
+      glyph at 0.13 of the font size; the distance field is measured in em,
+      so that reach is the same number at every size, and the shader takes
+      it as a uniform that never changes.
+
+  One departure from "vertex shader, no CPU work": the glyph quad is the
+  shader's, but finding the pen positions is not. A glyph's place on the
+  baseline is an arc length along a projected polyline, so a vertex shader
+  would walk the whole polyline once per glyph; doing it once per run on the
+  CPU is cheaper (a few thousand multiplies across the map) and is where
+  centring, foreshortening and the horizon test naturally live. Still holds:
+  no re-layout on rotation, no label sitting out a drag.
+
+  Foreshortening: a baseline's own great-circle length says what it would
+  measure face-on; how much shorter it measures now is how much the ground
+  under it has turned away. The ratio, clamped at 0.5, is the compression —
+  automatically per-label and per-frame.
+
+  Not built, and it should be: nothing yet re-runs the layout when territory
+  changes, because nothing in the harness paints a state. The wiring is
+  labels.update({assign, stateInfo, assignVersion, labelsVersion, visible}),
+  the same call main.js already makes. C7.
+
+  Closed by C7, in one line: makeMainLabeler returns the globe labeler
+  instead of the SVG one, so main.js's existing update call reaches it
+  unchanged. The SVG state labels for the main region are gone; the two
+  inset boxes keep them, since their projections never move. Result: names
+  stay on the map through a drag instead of hiding for the gesture.
+
+C6. Carving                                                            [BUILT]
+  Depends on: C1, C2.
+
+  This is the one chunk that changes what the map shows, so the "how it
+  draws, not what it shows" rule at the top doesn't cover it.
+
+  The deck.gl knife assigns whole tracts to one side or the other by their
+  centroids, so the piece boundary is a tract lattice that can sit a couple
+  of kilometres off the drawn line, and the drawn line isn't recoverable
+  from the result. The new default is the other way round: the drawn line is
+  the boundary, tracts straddling it are split, and everything a tract
+  reports divides by the land area on each side. `keep tracts intact` asks
+  for the old behaviour, which is also what a hand-authored preset has
+  always meant when it names a list of tract GEOIDs.
+
+  Built as:
+    src/globe/cut.js            the chord walk: cut a simple ring by curves
+    src/globe/carve.js          the model: cuts, the piece tree, weights, rows,
+                                  the file format
+    src/globe/dynamic.js        the two runtime buffers and the piece unit pool
+    geometry.js unitTriangles   the county fills, kept on the CPU
+    renderer.js, layers.js      the carved fills, the dividers, the knife
+    split.js allocatePieces     now takes fractional tracts
+    scripts/carve-check.mjs     npm run check:carve
+    globe.html + dev.js         the knife, and the intact checkbox
+
+  Measured, on Cuyahoga (427 tracts): 18 ms a cut, 22 parent triangles
+  becoming 56 piece triangles and 17 divider segments. Nearly all of the
+  18 ms is the per-tract weights (427 small triangulations), none of it is
+  drawing. A piece reached by two cuts writes down to 3.9 KB.
+
+  Eight things settled:
+
+    - cutting the county's own triangles, rather than its source polygon, is
+      what makes a hand-rolled clipper feasible: the compiled triangles
+      arrive refined to 120 km, wound correctly, holes already resolved by
+      the triangulation, and the antimeridian already unwrapped. cut.js never
+      sees a hole or a multipolygon — the two cases that make a general
+      polygon boolean hard. The 31 units with holes (52 of them) and the 247
+      with islands need no special case; Fairfax County VA, which has
+      Fairfax City as a hole in the middle, cuts like anything else, and the
+      check asserts the city stays out of both pieces.
+    - the area measure had to be made exact before any of this could be
+      checked. The obvious measure (planar area times the cosine of the
+      middle latitude) is a quadrature, and the parts don't sum to the
+      whole under it: tiling residue of 6e-8 relative, too coarse to
+      distinguish a real gap from noise. Green's theorem with L = -sin(lat)
+      turns the integral of cos(lat) into a walk along the boundary; a
+      shared edge is traversed once each way and the two terms cancel to the
+      bit. Residue now 8e-15 — the difference between a check that can fail
+      and one that can't.
+    - there's no equivalent here of split.js's fringe machinery. split.js
+      spends a parent-shaped backing piece, extruded fringe ribbons, and a
+      five-step probe ladder (reclassifyRecords) reconciling the 1:500k
+      tract outlines with the map's simplified county outline. Pieces that
+      are the county's own triangles tile it by construction, so none of
+      that has a counterpart. C8 deletes it without replacing it.
+    - a piece is a unit: same unit id per vertex, same two palettes, same
+      hover path, same left/right pair on the lines between pieces. Hiding a
+      carved parent is one texel written to zero alpha. No shader change
+      anywhere in C6.
+    - rounding happens on the way in. Quantizing the drawn line to six
+      decimals at export time moved it by up to a tenth of a metre — nothing
+      to look at, but enough to move a county-sized piece's population by
+      three people, so a piece wouldn't reload as itself. Quantizing on
+      arrival instead (the line was drawn with a pointer at 295 m to the
+      pixel at the deepest zoom, so eleven centimetres costs nothing real)
+      makes the file and the memory the same numbers and the round trip
+      bit-exact.
+    - the one shape the chord walk can't produce is a hole, so the one input
+      it can't take is a closed curve sitting strictly inside a triangle.
+      Not hypothetical: circling an area to cut it out as an enclave is a
+      gesture the deck.gl app already supports, and a loop drawn around a
+      city fits inside a 120 km triangle easily. Handled by splitting that
+      triangle with a straight auxiliary line first (the same call again),
+      so the loop then crosses both halves.
+    - a loop's ends are inside the county on purpose. "A cut that ends
+      inside a county hasn't sliced it" is the rule that picks which
+      counties a stroke applies to, and it's exactly wrong for a loop: it
+      dropped the only county the loop was drawn in, so circling an enclave
+      carved nothing. Found by writing the check, not by looking at the
+      screen.
+    - the antimeridian comes back once, and only in the stroke. C1 made it
+      stop existing for geometry, but unproject returns [-180, 180], so a
+      stroke drawn across the Aleutians steps from +179 to -179 (half a
+      kilometre of water, 358 degrees of number), and the sampler that picks
+      which counties a stroke crosses would walk the long way round the
+      world between those two points. Accumulating the short way puts the
+      whole stroke in one frame, and each county then shifts it into its
+      own. Aleutians West is 43 polygons spanning 172.5 to 193.9 in its own
+      frame, and the check cuts it; without the unwrap the same cut sampled
+      the Atlantic.
+
+  The file format. A piece can't be written down as a list of tract ids any
+  more, since a split tract belongs to two pieces at once. What's written
+  down instead is the cuts that reach it and which side of each it's on:
+
+    { "fips": "39035",
+      "tracts": ["39035101101", ...],
+      "cuts": [ { "line": [[-81.85, 41.47], ...], "side": "left" } ] }
+
+  The tract list is derived, for a person reading the file; the cuts are
+  what reconstruct the geometry. `side` is left or right of the direction
+  the line was drawn in, so it means something without the construction in
+  front of you.
+
+  One case has no cuts to write: a piece that follows tract lines and
+  nothing else is completely described by its tracts. That's exactly the
+  `{ fips, tracts }` entry "Copy JSON" has always exported, and every
+  hand-authored preset uses, so those files keep working. The check loads
+  Bootheel and all thirteen partial counties of Delta.
+
+  Guards, since a stroke is drawn by hand and can ask for things that aren't
+  a partition: a self-crossing stroke is refused with a message (the chord
+  walk assumes chords of one curve don't separate each other's ends around a
+  ring); a piece under 1e-4 of its county is a graze rather than a cut and
+  its branch collapses; a tract sliver under 0.5% of the tract rounds to
+  nothing and goes to whichever piece holds the rest of it; a crossing that
+  lands on a vertex nudges the curve by 1e-9 degrees rather than taking a
+  coin toss on the parity. The check sweeps a line in towards a county's
+  edge until the graze floor bites and asserts both outcomes happen and that
+  nothing under the floor is ever minted.
+
+  Left on C7's desk, and C7 did none of it — joining C6's model to the app's
+  split registry turned out to be a chunk of its own rather than a corner of
+  the shell. The knife, the GeoJSON import and a preset's partial counties
+  are all held back on the globe (?deck still does them). Carries to C8
+  unchanged except where marked:
+    - painting a piece. The harness colours pieces by a hash of their id so a
+      cut is visible; assignment, state colours and the rankings are the
+      shell.
+    - the labeler doesn't re-lay out when a carve moves territory. C7 closed
+      the general case (painting a state does re-lay out now), so what's
+      left is only the carve path that reaches it.
+    - re-owning the static line sides. A segment of a carved county's outer
+      boundary still carries the parent's unit id in aLeft/aRight. This cost
+      nothing until C3 styles a border by the two sides' states rather than
+      by which group it came from — which is what C7 does now: the band, the
+      grey state line and the selection outline all read the two sides'
+      states from the attribute table. On a carved county all three would
+      follow the retired parent, which has no state. Nothing shows it yet
+      only because carving is off on the globe; it's a prerequisite for
+      turning it on, not a nicety. Still needed: a CPU copy of two uint16
+      arrays (1.2 MB) and a containment test per segment.
+    - the AK/HI insets keep the CPU path, so a county in one can't be carved
+      on the globe.
+
+C7. Interaction and shell                                     [BUILT, UNSEEN]
+  Depends on: C2-C6.
+  Rotation drag, pan, zoom, reset view, globe mode toggle.
+  The zoom's lower bound is currently "fit the land", recomputed from
+  MAP_BOUNDS after each bake. Either recompute it from a coarse point set per
+  rotation or fix it.
+  Two things C4 leaves on C7's desk:
+    - the knife line, the carve preview and the selection outline all move
+      without the map moving, so they belong outside the cached scene,
+      beside the hover tint.
+    - a drag is the one gesture that must redraw the scene every frame, so
+      it's where open risk 6 bites if it bites at all. Measure it first.
+
+  Built as:
+    src/globe/map.js          the one seam: createGlobeMap({canvas, features})
+    shaders.js UNIT_ATTR      a second per-unit table, read by LINE_VS
+    layers.js                 rewritten as the parity document, 20 layers
+    renderer.js               line modes, the attribute table, view switches,
+                                hover over a SET of units
+    main.js                   22 branches on `globeMap`, all of them C8's to
+                                delete along with the ?deck path
+    index.html #data-marks    the data view's symbols, as SVG
+    scripts/layer-check.mjs   npm run check:layers
+
+  The app is otherwise untouched: the model, the stats, the ranking, the
+  sidebar, the presets, the tooltip, the legend and the two inset boxes all
+  run exactly as before; the insets keep deck.gl and their fixed cameras.
+  `?deck` puts the old renderer back on the same page, for the C3 comparison.
+
+  Seven things settled:
+
+    - the camera bridge is two lines. main.js works in a 975x610 design box
+      and lets an SVG viewBox fit it to the canvas; C1 fitted the compiled
+      globe to the same box from the same d3.geoOrthographic fit. So a
+      d3.zoom (k, x, y) maps onto the camera's (zoom, pan) directly:
+          pan = fit * dpr * (globeTranslate * (k - 1) + t)
+      and the radius agrees already, both being globeScale * k * fit. d3.zoom
+      stays in charge of the wheel feel, the scale extent and the gesture
+      filter; only its destination changed. main.js asserts the two fits
+      agree at startup, since if they ever stop agreeing every pixel is half
+      a continent out and nothing else would say so.
+    - the second table matters more than the palette. A fill asks one
+      question about one unit, which the palette answers. Every line that
+      matters asks about the two units it separates: is this a state border
+      or a county hairline, does the band run along here, is this segment on
+      the selected state's outline. main.js answers those on the CPU and
+      re-uploads a colour or a filter value per segment; here they're three
+      texel reads in the vertex shader, off a unit -> (state index, flags)
+      table, with the four answers one `uMode` uniform apart. Painting a
+      county is now three texels and no geometry — fill, band, owner — and
+      that one change restyles the borders, the band and the selection with
+      it.
+    - the band was wrong in the harness, and it wasn't visible there. C2
+      stroked the band's stencil along every county arc with skipEqual,
+      which is right only when every unit is its own state — exactly how the
+      harness tints. Against the real assignment it would have drawn a
+      border band down every county line in America. Same story for the grey
+      state line: there was no state to be a border of in the harness. Both
+      fell out of the attribute table, and neither was visible until the
+      app's own model was behind it.
+    - the selection outline goes inside the cached scene, against what C4
+      left on this desk. C4's rule (an overlay that moves without the map
+      wants to be outside) doesn't apply here because the selection doesn't
+      move without the map: picking a state also dims, highlights and
+      deepens it, so it invalidates the scene anyway. Drawing it inside costs
+      one pass over the border strokes on a frame that's already redrawing,
+      against a pass on every hover frame if it sat outside. The knife stays
+      outside; it follows the pointer and nothing else.
+    - the zoom floor is a coarse point set, as this entry proposed: eight
+      points per unit ring (~30k total), projected through the current
+      facing and reduced to a bounding box. A bound only cares about
+      extremes, so the answer lands within a pixel of the full map's for
+      three orders of magnitude less work. Runs per rotation frame, since a
+      facing now changes 60 times a second.
+    - two things the app read off projected geometry had to be replaced: the
+      zoom floor above, and the per-county centroids the data view places
+      its symbols and values from (computeCountyGeo). The centroids are now
+      an area-weighted sum over each unit's compiled triangles, done once on
+      the sphere and re-projected per facing, with the far side dropped the
+      way clipping used to drop it. Everything else main.js needs — hover,
+      picking, the band, the borders — asks about units, not points.
+    - the spin preview is gone. beginSpin/spinTo/settleSpin still exist for
+      the ?deck path; on the globe spinTo is setRotation, so every frame of a
+      drag is the real map — county lines, bands, labels, the lot — with no
+      settle, no coarse outline, no 130 ms, and no labels sitting out the
+      gesture.
+
+  Left undone, deliberately: carving. The knife, the GeoJSON import and a
+  preset's partial counties all write into main.js's split registry (splits,
+  splitCountyGeometry, fringeRibbons, applyPartition), and C6's model is a
+  different representation of the same idea that nothing joins to it. The
+  globe would take the cut and show nothing, so all three are held back with
+  a message rather than left to cut a map that can't draw the result: `?deck`
+  still does them. A preset's partial counties are left unclaimed rather
+  than claimed whole, so a preset means less than it should but never the
+  wrong thing. Joining them is the first job of C8 — C6's carver already has
+  the pieces, the rows and the file format; what's missing is somewhere in
+  the app model to put them, and the static line sides need re-owning first
+  (see the end of C6).
+
+  Also open, and smaller:
+    - the 27.3 MB of compiled geometry now blocks the app's first paint,
+      where before it only blocked the harness. C1's note about drawing the
+      sphere and the world first is no longer a nicety.
+    - the data view's symbols moved from the map to the overlay SVG, so the
+      hover tint no longer falls on them (it did on the deck path, where the
+      tint canvas sat above the map and below the SVG). It's 7% black on a
+      symbol; if it reads wrong, the fix is a mark program, not a re-layer.
+    - main.js still bakes the main region once at startup and still runs
+      rebuildDerived per refresh, producing arrays no renderer reads.
+      Harmless, wasteful, and C8's to delete.
+
+C8. Cutover
+  Depends on: everything.
+  First, and not a deletion: join C6's carver to the app model, which is the
+  one thing C7 held back — and re-own the static line sides first (see the
+  end of C6). Then the ?deck escape hatch goes, and with it all 22 branches
+  on `globeMap` in main.js.
+  Delete: bakeMain, projectParts/projectLines/projectRuns for the main
+  region, the spin preview and coarsen, MAP_BOUNDS recompute, all
+  MaskExtension usage, edgeBandPaths and bandMaskPaths, the antimeridian and
+  Panama seam special cases in build-world.mjs (artifacts of flattening).
+  And, from C6: splitCountyGeometry, tractsAcrossCut, reclassifyRecords,
+  fringeRibbons, carveIndex and the backing piece — they exist to reconcile
+  tract outlines with the drawn county line, and cutting the county's own
+  polygon means there's nothing to reconcile. allocatePieces stays: src/globe
+  imports it, and it already takes the fractional tracts C6 needs.
+  Keep: everything in the build scripts, presets.js, all stats and ranking,
+  the insets.
+  globe-check.mjs needs rewriting against the new representation.
+  Presets keep their `{ fips, tracts }` entries verbatim; C6 reads them as a
+  cut along tract lines and check:carve asserts Bootheel and Delta still
+  load.
+
+What gets simpler
+------------------
+Offsets the added renderer code, not a pitch:
+  - horizon clipping becomes one line of shader
+  - the antimeridian stops existing, along with the Chukotka and Fiji seams
+  - MaskExtension goes away entirely (bands and aprons become real geometry)
+  - picking loses the GPU readback stall
+  - recolouring becomes a texel write
+  - labels stop being rebuilt on rotation, and stop sitting out the drag
+  - the coarse spin preview and the 130ms settle both disappear (done, C7)
+  - a state border, the band along it and the selection outline stop being
+    CPU-side subsets of the arc list and become one texel per unit (done, C7)
+  - a carve loses the backing piece, the fringe ribbons and the probe ladder,
+    because pieces cut from the county's own polygon tile it exactly (done, C6)
+  - a cut becomes storable: it's lon/lat, so it survives a turn and a file
+
+Open risks
+----------
+  1. Line quality (C2). CLOSED. The original framing ("risk at 1px") was
+     wrong — hairlines were always fine. The real problems were at the wide
+     end, the 16px halo and the 10px band; see C2's closing lesson for why.
+  2. Carving buffer management (C6). CLOSED — not the hard part of C6, or even
+     a part of it. The original assumption (a carve patches the parent's
+     sub-range of the static fill buffer) forces two problems: a piece has
+     more triangles than the parent did, so the range no longer fits, and
+     reclaiming what a recut abandons is defragmentation. A second, small,
+     wholesale-rewritten buffer has neither, and every carve on the map costs
+     a hundredth of what one frame already draws. What C6 actually cost was
+     the arithmetic: the clipper, and getting the area measure exact enough
+     to check.
+  3. Antarctica triangulation (C1). Known, bounded, annoying.
+  4. We own ~2-3k lines of renderer we didn't own before (src/globe is 2,540
+     as of C5, ~3,700 as of C6, 4,600 as of C7, 5,200 with the harness). The
+     original estimate is comfortably blown; the last chunk was the cheapest
+     of the three (C7 added ~600 lines, of which the app-facing seam, map.js,
+     is 324). This is an ongoing cost, not a one-off. C5 adds a text stack —
+     glyph atlas, distance field, placer — the largest single addition after
+     the renderer itself. C6 adds a polygon clipper, the second largest, and
+     the one place the alternative was an off-the-shelf dependency; it came
+     to ~350 lines because it only ever cuts triangles (a general boolean
+     would be several times the code). C8 hands some of this back: split.js's
+     backing, fringe ribbons and probe ladder have no counterpart on the
+     globe.
+  5. Label quality at small sizes (C5). Open until it is looked at; see the
+     decision point below.
+  6. OPEN: what a scene frame costs at the zoomed-out view. C0 measured
+     hairlines only; C2 measured the 16px coast halo for its shape (the spiky
+     caps), never for its fill rate. A 16px stroke at dpr 2 lays a 34px wide
+     quad over every segment of a run, and at the North America view the
+     coast segments are a few pixels long, so the ~124,000 coast and world
+     coast segments paint their halo over itself about sixteen times — order
+     100M fragments, all blended, for one layer. Zoomed in, almost all of it
+     is off screen — the same asymmetry the hover lag exposed.
+     The framebuffer (C4) hides this from the hover but not from a drag,
+     which must redraw the scene every frame — so if the number is bad, it's
+     C7's problem, and the first thing to measure there. The harness reports
+     "scene frame" and "hover-only frame" separately for this.
+     Also worth checking: the world lake edges are 142,614 segments, a third
+     of every line instance in the file, drawn at 1.1px in both views —
+     cheap per quad but there are a lot of them. If a drag comes out slow,
+     check whether the cost is the halo's fill rate or that group's vertex
+     count before reaching for decimation — they want different fixes.
+     If it needs fixing, the lever is fewer quads, not a cheaper shader: the
+     halo's shape tolerance is about half its own width, so the coast run can
+     be decimated hard for the halo pass alone (~8x at that zoom) with
+     nothing visible changing. Same conclusion C0 reached about county arcs,
+     for the same reason.
+     Cheap to check: turn the globe on `/` at the home view and drag. Every
+     frame of that drag is a full scene redraw, and `?deck` is there to
+     compare the feel against.
+
+Decision points
+----------------
+  After C0: does the frame budget hold on the weakest target machine.
+
+  After C3: does it look identical to the current map side by side. If not,
+  stop and find out why before building C4-C7 on top of it.
+  Deferred until C7, since before that there was nothing to put side by
+  side (the harness tints every unit its own colour and has no states, no
+  selection, no data view). Now `/` and `/?deck` are the same page with the
+  same model and two renderers, so the comparison is a reload.
+  Four places the two are known not to agree, so they aren't the finding:
+  the under-lake edges (pixels here, ground units there — see C3), the data
+  view's symbols (SVG here, so the hover tint no longer lands on them), the
+  band and state lines on a carved county (C6 left the parent's unit ids on
+  its outer segments), and carving itself, which only ?deck does.
+
+  After C6: the pieces have never been looked at on screen. What node can
+  check is checked, and it's the half that matters most (the pieces tile,
+  the rows sum, a piece reloads as itself), but none of it says whether a
+  cut reads. Three things to watch for: whether the divider hairline reads
+  as a county line or as something thinner or coarser (it comes out of a
+  different buffer at the same width); whether the band along a piece
+  boundary looks like the band along a county boundary (the first real test
+  of the stencil construction against geometry it didn't come from); and
+  whether the pieces of one county are visibly seamed — they share exact
+  vertices, so they shouldn't be, and a hairline crack would mean the cut
+  points aren't reproduced identically on both sides of the join.
+
+  After C5: the labels have never been looked at on screen. Everything
+  checkable in node is checked (the frame, the ground sizes, the distance
+  field), but none of that says whether the type reads well on a sphere.
+  Two things to watch for, both cheap to fix and neither shows in a number:
+  SDF glyphs at the small end (~10 CSS px at the home view, where a distance
+  field is weakest), and whether MIN_COMPRESS at 0.5 is the right place to
+  stop foreshortening near the limb.
+  Best checked on `/` rather than in the harness: the labels are over the
+  real state colours, at the real sizes, beside the SVG ones the two inset
+  boxes still draw.
+
+  After C7, and this gates C8. Nothing in C7 has been looked at, and it's
+  the whole app rather than a harness:
+    - does a drag hold up (open risk 6), and does it feel like the ?deck pan;
+    - do the state colours, the border bands and the grey state lines match
+      ?deck side by side (the C3 decision point above);
+    - does painting still feel immediate — a brush stroke is now a palette
+      rewrite plus, when territory moves, a 95 ms label relayout;
+    - the data view: the choropleth through the palette, and the symbols now
+      that they are SVG.
+  Everything C7 held back is off on the globe and works on ?deck, so anything
+  carve-shaped that looks wrong is a message, not a bug.

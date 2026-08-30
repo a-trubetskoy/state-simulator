@@ -42,19 +42,27 @@ const TRACT_BACKED = ["pop", "eduT", "eduB", "rT", "rW", "rB", "rN", "rA", "rH"]
 const POP_ALLOCATED = ["gdp", "dem", "gop", "tot"];
 
 // Divide the county's published row across the pieces of a partition.
-// pieces: [{ id, tracts: Set }]; landShares: Map(id -> spherical-area share)
-// from splitCountyGeometry. Returns Map(id -> row). Every piece takes its
-// rounded share and the piece with the largest population absorbs the
-// rounding residue, so the pieces reproduce the county value to the unit.
+// pieces: [{ id, tracts: Set }] or [{ id, weights: Map(tractId -> 0..1) }];
+// landShares: Map(id -> spherical-area share). Returns Map(id -> row). Every
+// piece takes its rounded share and the piece with the largest population
+// absorbs the rounding residue, so the pieces reproduce the county value to
+// the unit.
+//
+// The weights form is what C6's default carve produces: a cut that follows the
+// drawn line rather than the tract lattice leaves tracts straddling it, and a
+// straddling tract contributes to both pieces in proportion to the land it has
+// in each. A tract set is the same thing with every weight at 1, which is what
+// keeping tracts whole amounts to.
 export function allocatePieces(county, tractRows, pieces, landShares) {
-  const ids = Object.keys(tractRows);
-  const sum = (field, tracts) => {
+  const weightsOf = (p) => p.weights ?? new Map([...p.tracts].map((t) => [t, 1]));
+  const pieceWeights = pieces.map(weightsOf);
+  const sum = (field, w) => {
     let t = 0;
-    for (const id of ids) if (tracts.has(id)) t += tractRows[id][field] || 0;
+    for (const [id, f] of w) t += f * (tractRows[id]?.[field] || 0);
     return t;
   };
   const shares = (field, fallback) => {
-    const per = pieces.map((p) => sum(field, p.tracts));
+    const per = pieceWeights.map((w) => sum(field, w));
     const total = per.reduce((a, b) => a + b, 0);
     return total > 0 ? per.map((v) => v / total) : fallback;
   };
@@ -77,25 +85,32 @@ export function allocatePieces(county, tractRows, pieces, landShares) {
   // Median household income: population-weighted mean of tract medians per
   // piece, scaled so the county-wide mean lands exactly on the county's
   // published median — the state's (weighted-mean) income statistic then
-  // doesn't move when a county is carved.
-  const weightedMedian = (filter) => {
+  // doesn't move when a county is carved. A straddling tract weighs into each
+  // piece by the population its land share carries there, which is the same
+  // assumption the rest of this function makes.
+  const weightedMedian = (weightAt) => {
     let ws = 0;
     let w = 0;
-    for (const id of ids) {
+    for (const id of Object.keys(tractRows)) {
       const r = tractRows[id];
-      if (filter(id) && r.mhi != null && r.pop > 0) {
-        ws += r.mhi * r.pop;
-        w += r.pop;
+      const f = weightAt(id);
+      if (f > 0 && r.mhi != null && r.pop > 0) {
+        ws += r.mhi * r.pop * f;
+        w += r.pop * f;
       }
     }
     return w > 0 ? ws / w : null;
   };
-  const whole = weightedMedian(() => true);
+  const whole = weightedMedian(() => 1);
   const scale = county.mhi && whole ? county.mhi / whole : null;
-  for (const p of pieces) {
-    const m = weightedMedian((id) => p.tracts.has(id));
+  pieces.forEach((p, i) => {
+    const m = weightedMedian((id) => pieceWeights[i].get(id) ?? 0);
     rows.get(p.id).mhi = scale && m != null ? Math.round(m * scale) : county.mhi ?? null;
-  }
+  });
+
+  // Life expectancy has no tract-level source at all, so every piece just
+  // carries the parent county's value unchanged.
+  for (const p of pieces) rows.get(p.id).life = county.life ?? null;
   return rows;
 }
 

@@ -2,25 +2,35 @@
 //   public/data/na-counties-topo.json  — TopoJSON of the map's units: 2023 US
 //     county boundaries (50 states + DC), Canada's 2021 census divisions, and
 //     every Mexican state and Caribbean / Central American country as one unit
-//   public/data/na-county-data.json    — per-unit population, GDP, and (for US
-//     counties and Canadian divisions) education and income; election and race
-//     counts for US counties only
+//   public/data/na-county-data.json    — per-unit population, GDP, education
+//     and income (the latter two are real survey figures for US counties and
+//     Canadian divisions, rough hand-compiled estimates for Mexico and the
+//     Caribbean/Central America); election, race, and life expectancy counts
+//     for US counties only
 //   public/data/na-map-overlays.json   — classified map boundary, the
 //     US/Canada/Mexico border seam, and notable lakes
+//
+// The fourth file the app loads, public/data/world-land.json, is scenery
+// rather than map and is built separately by build-world.mjs.
 //
 // Sources (all keyless public downloads):
 //   Geometry:   Census cartographic boundary file cb_2023_us_county_5m;
 //               Statistics Canada 2021 census division cartographic boundaries;
 //               Natural Earth 10m admin-0/admin-1 (lakes variants)
+//   Lakes:      Natural Earth 10m lakes, plus TIGER 2023 area hydrography for
+//               the water Natural Earth files as coastal (CENSUS_LAKES in
+//               geo-lib.mjs, which build-world.mjs reads too)
 //   Population: Census PEP vintage-2025 county estimates (falls back to 2024)
 //   GDP:        BEA CAGDP2 (county GDP, current dollars, thousands)
 //   Education:  USDA ERS county educational attainment (ACS 2019-23 counts)
 //   Election:   county-level 2024 presidential results (tonmcg/US_County_Level_Election_Results)
+//   Life exp.:  County Health Rankings & Roadmaps analytic file (NCHS mortality
+//               + Census population), 2021-23, US counties only
 //   Canada:     2021 Census Profile by census division (population, household
 //               income, education, employment income)
-//   Non-US:     hand-compiled population/GDP table in na-unit-data.mjs, which
-//               doubles as the provincial control totals Canada's divisions
-//               are apportioned from
+//   Non-US:     hand-compiled population/GDP/education/income table in
+//               na-unit-data.mjs, which doubles as the provincial control
+//               totals Canada's divisions are apportioned from
 //
 // Downloads are cached in .cache/ so reruns work offline. The Canadian
 // boundary file carries millions of vertices, so `npm run data` raises Node's
@@ -44,7 +54,12 @@ import {
 import { geoArea } from "d3-geo";
 import proj4 from "proj4";
 import { NA_UNIT_STATS } from "./na-unit-data.mjs";
-import { makeDownloader, simplifyArcs, rewindRings } from "./geo-lib.mjs";
+import {
+  makeDownloader,
+  simplifyArcs,
+  rewindRings,
+  loadCensusLakes,
+} from "./geo-lib.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cacheDir = join(root, ".cache");
@@ -60,6 +75,10 @@ const URLS = {
   education: "https://www.ers.usda.gov/media/5495/educational-attainment-for-adults-age-25-and-older-for-the-united-states-states-and-counties-1970-2023.csv?v=13505",
   election: "https://raw.githubusercontent.com/tonmcg/US_County_Level_Election_Results_08-24/master/2024_US_County_Level_Presidential_Results.csv",
   saipe: "https://www2.census.gov/programs-surveys/saipe/datasets/2023/2023-state-and-county/est23all.txt",
+  // County Health Rankings & Roadmaps analytic file: life expectancy at birth
+  // (measure v147), pooled from NCHS mortality and Census population data.
+  // Bump the year/version when a newer annual release replaces this one.
+  lifeExpectancy: "https://www.countyhealthrankings.org/sites/default/files/media/document/analytic_data2025_v3.csv",
   race2025: "https://www2.census.gov/programs-surveys/popest/datasets/2020-2025/counties/asrh/cc-est2025-alldata.csv",
   race2024: "https://www2.census.gov/programs-surveys/popest/datasets/2020-2024/counties/asrh/cc-est2024-alldata.csv",
   lakes: "https://naturalearth.s3.amazonaws.com/10m_physical/ne_10m_lakes.zip",
@@ -402,6 +421,31 @@ async function loadIncome() {
   return { mhi, year: 2023 };
 }
 
+// ---------------------------------------------------------- life expectancy
+
+// County Health Rankings & Roadmaps analytic file. Its first row is a
+// human-readable label per column; the row below it is the machine key
+// ("fipscode", "v147_rawvalue" for life expectancy) the data rows key off,
+// so the label row is dropped before parsing it as a normal header+rows CSV.
+// A county under 5,000 population-years-at-risk in the window reports no
+// value. Connecticut's new planning regions are present but all blank: NCHS
+// hasn't recomputed life expectancy for that geography yet, so Connecticut
+// carries no life expectancy until it does.
+async function loadLifeExpectancy() {
+  const buf = await download(URLS.lifeExpectancy, "chr-analytic-2025.csv");
+  const text = new TextDecoder("utf-8").decode(buf).replace(/^﻿/, "");
+  const rows = csvParse(text.slice(text.indexOf("\n") + 1));
+  const life = new Map(); // fips -> years
+  for (const r of rows) {
+    const fips = r.fipscode;
+    if (!/^\d{5}$/.test(fips) || fips.endsWith("000")) continue; // state/US rows
+    const value = +r.v147_rawvalue;
+    if (Number.isFinite(value) && value > 0) life.set(fips, value);
+  }
+  console.log(`life expectancy: ${life.size} counties, CHR&R 2021-23 (NCHS mortality + Census population)`);
+  return { life, window: "2021-23" };
+}
+
 // Census PEP county characteristics (ASRH): race/ethnicity counts. We keep
 // the AGEGRP=0 (all ages) rows for the latest estimate year: not-Hispanic
 // white/Black/Native/Asian alone, plus Hispanic of any race. Counts are
@@ -569,7 +613,7 @@ const ABSORB_KM = { coast: 8, lakeshore: 8, border: 2 };
 // Natural Earth DBFs are UTF-8 with NUL padding on every string field.
 const neClean = (v) => (typeof v === "string" ? v.replace(/\0/g, "").trim() : v);
 
-async function readNeShapefile(url, filename) {
+async function readShapefileZip(url, filename) {
   const zip = unzipSync(new Uint8Array(await download(url, filename)));
   const shpName = Object.keys(zip).find((n) => n.endsWith(".shp"));
   const dbfName = Object.keys(zip).find((n) => n.endsWith(".dbf"));
@@ -635,6 +679,84 @@ const CA_PROVINCES = new Map([
   ["62", ["CA-NU", "Nunavut"]],
 ]);
 
+// StatCan's own CDNAME is just "Division No. N" for every division in
+// Alberta, Saskatchewan and Manitoba — unlike Ontario or Quebec, the prairie
+// provinces never got real division names. This overrides those three
+// provinces' names with each division's largest city or town, the same de
+// facto identity Wikipedia's per-province census division lists use.
+// Hand-compiled from those lists (population centre data), not a StatCan
+// field, so a name can drift out of date as a division's largest place
+// changes between censuses. Keys are CDUID: PRUID + two-digit division no.
+const CA_CD_NAME_OVERRIDES = new Map(
+  Object.entries({
+    // --- Alberta ---------------------------------------------------------
+    "4801": "Medicine Hat",
+    "4802": "Lethbridge",
+    "4803": "Claresholm",
+    "4804": "Hanna",
+    "4805": "Strathmore",
+    "4806": "Calgary",
+    "4807": "Wainwright",
+    "4808": "Red Deer",
+    "4809": "Rocky Mountain House",
+    "4810": "Lloydminster",
+    "4811": "Edmonton",
+    "4812": "Cold Lake",
+    "4813": "Whitecourt",
+    "4814": "Hinton",
+    "4815": "Canmore",
+    "4816": "Fort McMurray",
+    "4817": "Slave Lake",
+    "4818": "Grande Cache",
+    "4819": "Grande Prairie",
+
+    // --- Saskatchewan ------------------------------------------------------
+    "4701": "Estevan",
+    "4702": "Weyburn",
+    "4703": "Assiniboia",
+    "4704": "Maple Creek",
+    "4705": "Melville",
+    "4706": "Regina",
+    "4707": "Moose Jaw",
+    "4708": "Swift Current",
+    "4709": "Yorkton",
+    "4710": "Wynyard",
+    "4711": "Saskatoon",
+    "4712": "Battleford",
+    "4713": "Kindersley",
+    "4714": "Melfort",
+    "4715": "Prince Albert",
+    "4716": "North Battleford",
+    "4717": "Lloydminster",
+    "4718": "La Ronge",
+
+    // --- Manitoba ------------------------------------------------------
+    "4601": "Pinawa",
+    "4602": "Steinbach",
+    "4603": "Winkler",
+    "4604": "Manitou",
+    "4605": "Killarney",
+    "4606": "Virden",
+    "4607": "Brandon",
+    "4608": "Treherne",
+    "4609": "Portage la Prairie",
+    "4610": "Elie",
+    "4611": "Winnipeg",
+    "4612": "Oakbank",
+    "4613": "Selkirk",
+    "4614": "Stonewall",
+    "4615": "Neepawa",
+    "4616": "Roblin",
+    "4617": "Dauphin",
+    "4618": "Gimli",
+    "4619": "Peguis",
+    "4620": "Swan River",
+    "4621": "The Pas",
+    "4622": "Thompson",
+    "4623": "Gillam",
+  })
+);
+
 const CA_CD_CACHE = "lcd_000b21a_e.zip";
 
 async function loadCaDivisionFeatures() {
@@ -672,8 +794,11 @@ async function loadCaDivisionFeatures() {
       type: "Feature",
       id: "CA-" + f.properties.CDUID,
       properties: {
-        // StatCan pads the numbered divisions ("Division No.  1").
-        name: neClean(f.properties.CDNAME).replace(/\s+/g, " "),
+        // StatCan pads the numbered divisions ("Division No.  1"); the
+        // prairie provinces get a real name from CA_CD_NAME_OVERRIDES instead.
+        name:
+          CA_CD_NAME_OVERRIDES.get(String(f.properties.CDUID)) ??
+          neClean(f.properties.CDNAME).replace(/\s+/g, " "),
         st: prov[0],
       },
       geometry: f.geometry,
@@ -710,7 +835,7 @@ async function loadNaForeignFeatures() {
   for (const [, [id, name]] of CA_PROVINCES) stateNames.set(id, name);
 
   // Mexico at admin-1 (states).
-  const a1 = await readNeShapefile(URLS.admin1, NE_A1_CACHE);
+  const a1 = await readShapefileZip(URLS.admin1, NE_A1_CACHE);
   for (const f of a1.features) {
     if (neClean(f.properties.adm0_a3) !== "MEX") continue;
     const iso = neClean(f.properties.iso_3166_2);
@@ -729,7 +854,7 @@ async function loadNaForeignFeatures() {
   // Guantanamo Bay naval base is folded back into Cuba so the coastline has
   // no hole.
   const NA_SKIP = new Set(["MEX", "CLP", "BJN", "SER", "USG"]);
-  const a0fc = await readNeShapefile(URLS.admin0, NE_A0_CACHE);
+  const a0fc = await readShapefileZip(URLS.admin0, NE_A0_CACHE);
   const byA3 = new Map(a0fc.features.map((f) => [neClean(f.properties.ADM0_A3), f]));
   for (const f of a0fc.features) {
     const sub = neClean(f.properties.SUBREGION);
@@ -1133,9 +1258,8 @@ async function buildNaOverlays(topo, foreignIds) {
   const lakesFc = await shapefile.read(Buffer.from(zip[shpName]), Buffer.from(zip[dbfName]));
   // Each entry is one lake as a group of name aliases; a group left unmatched
   // at the end of the scan is warned about, so a rename on Natural Earth's
-  // side can't silently drop a lake from the map. Lake Pontchartrain is
-  // deliberately absent: ne_10m_lakes has no feature for it (NE treats it as
-  // coastal water), and the carved Census shoreline already reads as sea.
+  // side can't silently drop a lake from the map. Lakes Natural Earth has no
+  // feature for at all are listed separately, in CENSUS_LAKES (geo-lib.mjs).
   const WANTED_GROUPS = [
     ["lake superior"], ["lake michigan"], ["lake huron"], ["lake erie"],
     ["lake ontario"], ["lake st clair"], ["great salt lake"], ["lake champlain"],
@@ -1153,13 +1277,10 @@ async function buildNaOverlays(topo, foreignIds) {
 
   const rawLakeFeatures = [];
   const carvedLakes = [];
-  for (const f of lakesFc.features) {
-    const group = WANTED.get(normName(f.properties.name));
-    if (group === undefined) continue;
-    const [cx] = f.geometry.coordinates.flat(f.geometry.type === "MultiPolygon" ? 2 : 1)[0];
-    if (cx > -55 || cx < -170) continue; // same-named lakes elsewhere in the world
-    matched.add(group);
-    const lakePolys = polysOf(f.geometry);
+  // Sample the lake's own area against the map's land to decide which side of
+  // the county fills it is drawn on, then keep it.
+  const addLake = (name, geometry) => {
+    const lakePolys = polysOf(geometry);
     const [x0, y0, x1, y1] = lakePolys.reduce(
       (b, p) => [
         Math.min(b[0], p.bbox[0]), Math.min(b[1], p.bbox[1]),
@@ -1178,30 +1299,48 @@ async function buildNaOverlays(topo, foreignIds) {
     }
     const onland = inLake > 0 && onLand / inLake > 0.15;
     if (!onland) carvedLakes.push(...lakePolys);
-    rawLakeFeatures.push({
-      type: "Feature",
-      properties: { name: f.properties.name, onland },
-      geometry: f.geometry,
-    });
+    rawLakeFeatures.push({ type: "Feature", properties: { name, onland }, geometry });
+  };
+
+  for (const f of lakesFc.features) {
+    const group = WANTED.get(normName(f.properties.name));
+    if (group === undefined) continue;
+    const [cx] = f.geometry.coordinates.flat(f.geometry.type === "MultiPolygon" ? 2 : 1)[0];
+    if (cx > -55 || cx < -170) continue; // same-named lakes elsewhere in the world
+    matched.add(group);
+    addLake(f.properties.name, f.geometry);
   }
   for (let i = 0; i < WANTED_GROUPS.length; i++) {
     if (!matched.has(i))
       console.warn(`  no Natural Earth lake matched "${WANTED_GROUPS[i][0]}"`);
   }
+  // The lakes Natural Earth doesn't carry (see CENSUS_LAKES). These go through
+  // the same land sampling as the rest, so a Census lake the map's units cover
+  // draws over the fills exactly the way Okeechobee does.
+  for (const f of await loadCensusLakes(readShapefileZip))
+    addLake(f.properties.name, f.geometry);
 
-  // The land is generalized at SIMPLIFY_METRES, so a lake emitted at full NE
-  // detail would sit on the map as a conspicuously wiggly outline next to the
-  // simplified shorelines around it. Run the emitted geometry through the
-  // same Visvalingam pipeline. The probe polygons above keep the full detail:
-  // they only need to agree with where the water is, not with what is drawn.
+  // These used to be thinned at SIMPLIFY_METRES like the land, on the argument
+  // that a full-detail lake would read as conspicuously wiggly against the
+  // generalized shorelines around it. It cost half the source points (12,032 →
+  // 5,925) and took the median segment from 1.5 km to 3.6 km, which is under a
+  // pixel at the default view but 12 px at the 16x maximum: the lakes drawn
+  // over the fills went visibly polygonal as you zoomed in. Natural Earth 10m
+  // is the finest tier NE publishes, so its 1.5 km is the floor here whatever
+  // we do; there is no reason to give away half of it. Full detail costs 6,107
+  // points against ~309k line segments in the compiled globe geometry.
+  //
+  // Set LAKE_SIMPLIFY_METRES above 0 to thin them again — the pipeline is the
+  // same Visvalingam pass the land runs.
+  const LAKE_SIMPLIFY_METRES = 0;
   let lakeFeatures = rawLakeFeatures;
-  if (rawLakeFeatures.length) {
+  if (rawLakeFeatures.length && LAKE_SIMPLIFY_METRES > 0) {
     const lakeTopo = topology({
       lakes: { type: "FeatureCollection", features: rawLakeFeatures },
     });
     const { topo: thinned } = simplifyArcs(
       presimplify(lakeTopo, sphericalTriangleArea),
-      MIN_WEIGHT
+      (LAKE_SIMPLIFY_METRES / 1000) ** 2 / 2 / EARTH_RADIUS_KM ** 2
     );
     lakeFeatures = feature(thinned, thinned.objects.lakes).features;
   }
@@ -1428,11 +1567,12 @@ const { edu, window: eduWindow } = await loadEducation();
 const { votes, year: electionYear } = await loadElection(popCounties);
 const { mhi, year: incomeYear } = await loadIncome();
 const { race, year: raceYear } = await loadRace();
+const { life, window: lifeExpWindow } = await loadLifeExpectancy();
 
 const out = { counties: {}, states: {} };
 for (const [fips, name] of stateNames) if (+fips <= 56) out.states[fips] = name;
 
-const missing = { pop: [], gdp: [], edu: [], votes: [], income: [], race: [] };
+const missing = { pop: [], gdp: [], edu: [], votes: [], income: [], race: [], life: [] };
 for (const fips of [...geoIds].sort()) {
   const p = popCounties.get(fips);
   const g = gdp.get(fips) ?? null;
@@ -1440,12 +1580,14 @@ for (const fips of [...geoIds].sort()) {
   const v = votes.get(fips) ?? null;
   const inc = mhi.get(fips) ?? null;
   const r = race.get(fips) ?? null;
+  const lf = life.get(fips) ?? null;
   if (!p) missing.pop.push(fips);
   if (g === null) missing.gdp.push(fips);
   if (!e) missing.edu.push(fips);
   if (!v) missing.votes.push(fips);
   if (inc === null) missing.income.push(fips);
   if (!r) missing.race.push(fips);
+  if (lf === null) missing.life.push(fips);
   out.counties[fips] = {
     name: p?.name ?? fips,
     st: fips.slice(0, 2),
@@ -1457,6 +1599,7 @@ for (const fips of [...geoIds].sort()) {
     gop: v?.gop ?? null,
     tot: v?.tot ?? null,
     mhi: inc,
+    life: lf,
     rT: r?.rT ?? 0,
     rW: r?.rW ?? 0,
     rB: r?.rB ?? 0,
@@ -1470,16 +1613,27 @@ for (const fips of popCounties.keys()) {
 }
 
 // One pseudo-county per unit outside the union. Canadian census divisions
-// carry population, GDP, household income and education; Mexican states and
-// the Caribbean / Central American countries carry population and GDP only.
-// Every other stat is null, which the app renders as "—" and keeps out of
-// that ranking. `out.foreign` lists the foreign *states* — the provinces and
-// the single-unit countries — since that is the level the union admits.
+// carry population, GDP, household income and education from the real
+// census profile below; Mexican states and the Caribbean / Central American
+// countries carry population and GDP from the same static table as their
+// education and income, a much rougher hand-compiled estimate (see the
+// comment in na-unit-data.mjs). Every other stat is null, which the app
+// renders as "—" and keeps out of that ranking. `out.foreign` lists the
+// foreign *states* — the provinces and the single-unit countries — since
+// that is the level the union admits.
 const caProfile = await loadCaProfile();
 const { pop: caPop, year: caPopYear } = await loadCaPopulation();
 const caGrowth = await loadCaIncomeGrowth();
 const caDivisions = foreignFeatures.filter((f) => f.id !== f.properties.st);
 const caRows = apportionCaDivisions(caDivisions, caProfile, caPop, caGrowth);
+
+// Turns a hand-compiled bachelor's-attainment percentage into an eduT/eduB
+// pair comparable to the real US/Canada counts, which are both keyed on
+// roughly the population 25 and up. Only the eduB/eduT ratio feeds any
+// ranking, so the exact adult-share constant doesn't matter — it only
+// matters that it's in the right ballpark when a foreign unit's counts get
+// summed into a custom state alongside real US/Canada ones.
+const FOREIGN_ADULT_SHARE = 0.55;
 
 out.foreign = [...foreignStateNames.keys()];
 for (const [sid, name] of foreignStateNames) out.states[sid] = name;
@@ -1487,14 +1641,21 @@ for (const f of foreignFeatures) {
   const ca = caRows.get(f.id);
   const d = ca ?? NA_UNIT_STATS.get(f.id);
   if (!d) console.warn(`  no static stats for ${f.id} (${f.properties.name})`);
+  let eduT = ca?.eduT ?? 0;
+  let eduB = ca?.eduB ?? 0;
+  if (!ca && d?.bachPct != null) {
+    eduT = Math.round(d.pop * FOREIGN_ADULT_SHARE);
+    eduB = Math.round(eduT * (d.bachPct / 100));
+  }
   out.counties[f.id] = {
     name: f.properties.name,
     st: f.properties.st,
     pop: d?.pop ?? 0,
     gdp: d?.gdp ?? null,
-    eduT: ca?.eduT ?? 0, eduB: ca?.eduB ?? 0,
+    eduT, eduB,
     dem: null, gop: null, tot: null,
-    mhi: ca?.mhi ?? null,
+    mhi: ca?.mhi ?? d?.mhi ?? null,
+    life: null, // CHR&R/NCHS covers US counties only
     rT: 0, rW: 0, rB: 0, rN: 0, rA: 0, rH: 0,
   };
 }
@@ -1506,6 +1667,7 @@ out.meta = {
   electionYear,
   incomeYear,
   raceYear,
+  lifeExpWindow,
   built: new Date().toISOString().slice(0, 10),
   sources: {
     population: `Census Bureau population estimates, ${popYear}`,
@@ -1514,12 +1676,17 @@ out.meta = {
     election: `County-level ${electionYear} presidential results (tonmcg/US_County_Level_Election_Results)`,
     income: `Census SAIPE median household income, ${incomeYear}`,
     race: `Census county characteristics estimates (ASRH), ${raceYear}`,
+    lifeExpectancy: `County Health Rankings & Roadmaps (NCHS mortality + Census population), ${lifeExpWindow}`,
     canada:
       `Statistics Canada: population by census division, July ${caPopYear}; 2021 Census Profile ` +
       `for the ${CA_INCOME_FROM} household income and education counts, carried to ` +
       `${CA_INCOME_TO} by provincial T1 Family File income growth; GDP apportioned from ` +
       `provincial totals by employment income`,
-    foreign: "Non-US population & GDP: national statistics agencies / World Bank, 2023–24 (static estimates)",
+    foreign:
+      "Non-US pop & GDP: national statistics agencies / World Bank, 2023–24 (static estimates); " +
+      "Mexico education & income: INEGI census 2020 & ENIGH 2024; other countries' education: " +
+      "national censuses/UNESCO/World Bank (years vary); other countries' income: World Bank GNI " +
+      "per capita × a flat household-pooling factor (rough estimates throughout)",
     overlays: "Natural Earth (lakes, admin polygons for boundary classification)",
   },
 };

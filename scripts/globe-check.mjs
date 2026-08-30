@@ -176,10 +176,11 @@ for (const [name, rot] of [
 // ---------------------------- 4. the spin preview is cheap but still drawable
 {
   const nation = merge(topo, topo.objects.counties.geometries);
-  // Keep in step with SPIN_LAND in src/main.js.
+  // Keep in step with the spin preview in src/main.js: one merged, thinned
+  // outline per state, which is what lets a drag keep the map's colors.
   const STEP = 8;
   const MIN_DEG = 0.25;
-  const spans = (ring) => {
+  const ringSpan = (ring) => {
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (const [x, y] of ring) {
       if (x < x0) x0 = x;
@@ -187,22 +188,35 @@ for (const [name, rot] of [
       if (y < y0) y0 = y;
       if (y > y1) y1 = y;
     }
-    return Math.max(x1 - x0, y1 - y0) >= MIN_DEG;
+    return Math.max(x1 - x0, y1 - y0);
   };
+  const inverted = (ring) => d3geo.geoArea({ type: "Polygon", coordinates: [ring] }) > 2 * Math.PI;
   const thin = (ring) => {
     if (ring.length <= STEP + 2) return ring;
     const out = [];
     for (let i = 0; i < ring.length; i += STEP) out.push(ring[i]);
     if (out[out.length - 1] !== ring[ring.length - 1]) out.push(ring[ring.length - 1]);
-    return out.length >= 4 ? out : ring;
+    return out.length >= 4 && inverted(out) === inverted(ring) ? out : ring;
   };
-  const polys = nation.type === "Polygon" ? [nation.coordinates] : nation.coordinates;
-  const kept = [];
-  for (const rings of polys) {
-    if (!spans(rings[0])) continue;
-    kept.push([rings[0], ...rings.slice(1).filter(spans)].map(thin));
+  const coarsen = (geometry) => {
+    const polys = geometry.type === "Polygon" ? [geometry.coordinates] : geometry.coordinates;
+    const coarsePoly = (rings) =>
+      [rings[0], ...rings.slice(1).filter((r) => ringSpan(r) >= MIN_DEG)].map(thin);
+    const kept = [];
+    for (const rings of polys) if (ringSpan(rings[0]) >= MIN_DEG) kept.push(coarsePoly(rings));
+    if (!kept.length && polys.length)
+      kept.push(coarsePoly(polys.reduce((a, b) => (ringSpan(b[0]) > ringSpan(a[0]) ? b : a))));
+    return { type: "MultiPolygon", coordinates: kept };
+  };
+
+  // The app groups by `assign`, which starts as each unit's own state.
+  const groups = new Map();
+  for (const g of topo.objects.counties.geometries) {
+    const sid = g.properties.st;
+    if (!groups.has(sid)) groups.set(sid, []);
+    groups.get(sid).push(g);
   }
-  const spin = { type: "MultiPolygon", coordinates: kept };
+  const shapes = [...groups].map(([sid, gs]) => ({ sid, geometry: coarsen(merge(topo, gs)) }));
 
   const countVerts = (g) => {
     let n = 0;
@@ -210,23 +224,157 @@ for (const [name, rot] of [
     return n;
   };
   const full = countVerts(nation.type === "Polygon" ? { coordinates: [nation.coordinates] } : nation);
-  const cut = countVerts(spin);
-  check(cut < full / 2, `spin silhouette is much lighter than the full land (${cut.toLocaleString()} vs ${full.toLocaleString()} points)`);
+  const cut = shapes.reduce((n, s) => n + countVerts(s.geometry), 0);
   check(
-    spin.coordinates.every((rings) => rings.every((r) => r.length >= 4)),
+    cut < full / 2,
+    `spin outlines are much lighter than the full land (${cut.toLocaleString()} vs ${full.toLocaleString()} points, ${shapes.length} states)`
+  );
+  // Every state has to draw. A state whose shapes all fell to the speck filter
+  // would leave a hole in the land where it belongs — DC is the one that
+  // actually tests this, at 0.15 degrees across.
+  const missing = shapes.filter((s) => !s.geometry.coordinates.length).map((s) => s.sid);
+  check(missing.length === 0, `every state still draws in the preview (missing: ${missing.join(" ") || "none"})`);
+  check(
+    shapes.every((s) => s.geometry.coordinates.every((rings) => rings.every((r) => r.length >= 4))),
     "no spin ring was thinned below four points"
   );
+  // A ring that thinning turned inside out means everything-but-the-ring, and
+  // clipped to the hemisphere it paints the whole globe in one state's color.
+  check(
+    shapes.every((s) => s.geometry.coordinates.every((rings) => !inverted(rings[0]))),
+    "no spin ring turns inside out"
+  );
 
-  // And it must re-project inside a frame, since a drag re-bakes it on every
-  // pointermove. It measures about 4 ms; the budget leaves room for a slower
-  // machine but would still catch the silhouette growing back.
-  const trace = makeTracer(mainProjection(HOME_ROTATION));
-  trace(spin);
+  // And they must re-project inside a frame, since a drag re-bakes them on
+  // every animation frame. It measures about 4 ms; the budget leaves room for
+  // a slower machine but would still catch the outlines growing back.
+  const project = (rotate) => {
+    const trace = makeTracer(mainProjection(rotate));
+    for (const s of shapes) {
+      const polys = s.geometry.coordinates;
+      for (const rings of polys) trace({ type: "Polygon", coordinates: rings });
+    }
+  };
+  project(HOME_ROTATION);
   const t0 = performance.now();
   const N = 10;
-  for (let i = 0; i < N; i++) makeTracer(mainProjection([96 + i, -45]))(spin);
+  for (let i = 0; i < N; i++) project([96 + i, -45]);
   const per = (performance.now() - t0) / N;
-  check(per < 12, `spin silhouette re-projects in ${per.toFixed(1)} ms per frame`);
+  check(per < 12, `spin outlines re-project in ${per.toFixed(1)} ms per frame`);
+}
+
+// ------------------------------------ 5. the scenery land is drawable and cheap
+// world-land.json is Natural Earth's land minus the countries the map draws
+// itself, plus its lakes and the two line meshes — coastlines and country
+// borders — the build cuts from the same arcs. It is background, but it is
+// projected through the same globe as everything else, so it faces the same
+// hazards: a country that straddles the antimeridian (Russia, Fiji), one that
+// reaches the pole (Antarctica), and the horizon clip at every facing.
+{
+  const world = read("world-land.json");
+  const land = feature(world, world.objects.land).features;
+  const lakes = feature(world, world.objects.lakes).features;
+  const coast = feature(world, world.objects.coast).geometry;
+  const borders = feature(world, world.objects.borders).geometry;
+  const DISC_AREA = Math.PI * RADIUS ** 2;
+  const ringArea = (ring) => {
+    let twice = 0;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      twice += ring[j][0] * ring[i][1] - ring[i][0] * ring[j][1];
+    }
+    return Math.abs(twice) / 2;
+  };
+
+  check(land.length > 150, `${land.length} countries of scenery land`);
+  check(
+    !land.some((f) => ["USA", "CAN", "MEX"].includes(f.id)),
+    "the countries the map draws itself are left out"
+  );
+  for (const id of ["RUS", "ATA", "GRL", "AUS", "BRA", "CHN", "FJI"]) {
+    if (!land.some((f) => f.id === id)) bad(`scenery land is missing ${id}`);
+  }
+  // The scenery wears the map's own furniture, so all four pieces have to be
+  // there — a missing mesh is a world with no coastline or no country lines,
+  // which reads as the old flat tan rather than as an error.
+  check(coast.coordinates.length > 1000, `${coast.coordinates.length} scenery coastlines`);
+  check(borders.coordinates.length > 100, `${borders.coordinates.length} scenery country lines`);
+  check(lakes.length > 100, `${lakes.length} scenery lakes`);
+  // Every lake Natural Earth cuts out of the land has to be drawn back in, or
+  // the continent shows a bare hole where the water belongs. The cut-out ones
+  // are the big ones, so a floor well above them is the check that matters.
+  const R_KM = 6371;
+  const biggestLake = Math.max(...lakes.map((f) => d3geo.geoArea(f) * R_KM ** 2));
+  check(biggestLake > 60000, `the largest scenery lake is ${Math.round(biggestLake)} km²`);
+  // The Panama seam is the one stretch where the scenery meets the map on
+  // land. It belongs to neither mesh: the map draws its own border there, and
+  // a second line a few km off it would read as a doubled border.
+  const nearPanama = (p) => p[0] > -78.1 && p[0] < -77.1 && p[1] > 7 && p[1] < 8.8;
+  const seamLines = coast.coordinates.filter((l) => l.every(nearPanama)).length;
+  check(seamLines === 0, "the Panama seam is left out of the scenery's coastline");
+  // Natural Earth's own seam, where it cuts Russia and Fiji in half. Drawn, it
+  // is a straight blue line down the middle of the Chukotka Peninsula.
+  const onAnti = (p) => Math.abs(Math.abs(p[0]) - 180) < 0.01;
+  const antiSegments = coast.coordinates.reduce(
+    (n, l) => n + l.filter((p, i) => i > 0 && onAnti(p) && onAnti(l[i - 1])).length,
+    0
+  );
+  check(antiSegments === 0, "the antimeridian cut is left out of the scenery's coastline");
+
+  // Everything the bake projects, in the order it projects it. The lines go
+  // through the same tracer the shapes do, so a mesh that clipped badly at
+  // some facing would show up here exactly as a bad ring would.
+  const everything = [...land, ...lakes, { geometry: coast }, { geometry: borders }];
+
+  let worstShare = 0;
+  let worstAt = "";
+  for (const [name, rot] of [
+    ["home", HOME_ROTATION],
+    ["turned to the Atlantic", [30, -40]],
+    ["facing Asia", [-100, -20]],
+    ["over the pole", [96, -85]],
+    ["over the south pole", [96, 85]],
+  ]) {
+    const trace = makeTracer(mainProjection(rot));
+    let nonFinite = 0;
+    let outside = 0;
+    let pts = 0;
+    for (const f of everything) {
+      const closed = f.geometry.type.endsWith("Polygon");
+      for (const ring of trace(f.geometry)) {
+        if (ring.length < (closed ? 3 : 2)) continue;
+        for (const p of ring) {
+          pts++;
+          if (!Number.isFinite(p[0]) || !Number.isFinite(p[1])) nonFinite++;
+          else if (!inDisc(p)) outside++;
+        }
+        // A ring the projection turned inside out covers the hemisphere rather
+        // than the country. Nothing here is a quarter of the visible disc:
+        // Asia, the largest landmass, is about a sixth of it face-on.
+        if (!closed) continue;
+        const share = ringArea(ring) / DISC_AREA;
+        if (share > worstShare) (worstShare = share), (worstAt = `${f.id ?? f.properties?.name} at [${rot}]`);
+      }
+    }
+    const label = `scenery ${name} [${rot}]`;
+    check(nonFinite === 0, `${label}: every projected coordinate is finite (${pts.toLocaleString()} points)`);
+    check(outside === 0, `${label}: nothing projects outside the sphere's disc`);
+  }
+  check(worstShare < 0.25, `no scenery ring floods the disc (biggest is ${(100 * worstShare).toFixed(1)}%, ${worstAt})`);
+
+  // It is re-projected with everything else on every settle, so its share of
+  // that ~130 ms bake has to stay small. The coast and border meshes roughly
+  // double what there is to project: they retrace the same edges the land
+  // rings do, once as lines.
+  const trace = makeTracer(mainProjection(HOME_ROTATION));
+  for (const f of everything) trace(f.geometry);
+  const t0 = performance.now();
+  const N = 5;
+  for (let i = 0; i < N; i++) {
+    const t = makeTracer(mainProjection([96 + i, -45]));
+    for (const f of everything) t(f.geometry);
+  }
+  const per = (performance.now() - t0) / N;
+  check(per < 60, `the scenery re-projects in ${per.toFixed(1)} ms per bake`);
 }
 
 console.log(failed ? `\n${failed} check(s) failed` : "\nall checks passed");

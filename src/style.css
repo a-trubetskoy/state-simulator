@@ -262,7 +262,8 @@ main {
    color glow through instead of punching an opaque hole in it. pointer-events
    must stay off or the text would steal county hover and paint clicks from
    the rect beneath it. */
-#data-labels text {
+#data-labels text,
+#inset-data-labels text {
   font-family: Verdana, Geneva, Tahoma, sans-serif;
   fill: #000;
   stroke: #fff;
@@ -277,7 +278,8 @@ main {
 }
 
 /* On dark choropleth fills, black-on-white inverts to white-on-black. */
-#data-labels text.inverse {
+#data-labels text.inverse,
+#inset-data-labels text.inverse {
   fill: #fff;
   stroke: #000;
 }
@@ -307,6 +309,18 @@ main {
 #inset-state-labels line {
   stroke: #1a1a1a;
   stroke-width: 0.7;
+}
+
+/* While the globe is being turned, only a coarse preview of the map is
+   redrawn per frame (see the spin preview in main.js). These labels were
+   placed against the facing the last bake used, so they would sit over the
+   wrong ground the moment the globe moves. They come back with the settle.
+   A class here rather than a display attribute in main.js: the labeler owns
+   that attribute and rewrites it on every refresh, and a CSS rule outranks
+   it. The inset boxes keep their labels — the boxes do not turn. */
+#map.spinning #state-labels,
+#map.spinning #data-labels {
+  display: none;
 }
 
 #paint-banner[hidden],

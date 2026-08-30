@@ -65,6 +65,13 @@ export const PRESETS = [
     states: ["51", "54"],
   },
   {
+    id: "maine-to-massachusetts",
+    name: "Massachusetts",
+    label: "Original Massachusetts",
+    desc: "Reunites Maine with Massachusetts, as it was before Maine's 1820 statehood under the Missouri Compromise",
+    states: ["25", "23"],
+  },
+  {
     id: "franklin",
     name: "Franklin",
     desc: "The lost State of Franklin, 1784 (northeast Tennessee, approx.)",
@@ -913,6 +920,69 @@ export const PRESETS = [
     ],
   },
 
+  // --- Louisiana regions ---
+  {
+    id: "greater-new-orleans",
+    name: "Greater New Orleans",
+    desc: "Orleans, Jefferson, Plaquemines, and St. Bernard — the urbanized parishes left over once Acadiana, Central Louisiana, the Florida Parishes, and North Louisiana are carved out",
+    counties: ["22071", "22051", "22075", "22087"],
+  },
+  {
+    id: "acadiana",
+    name: "Acadiana",
+    desc: "The 22 parishes of Acadiana, as defined by the Louisiana legislature",
+    counties: [
+      "22001", "22005", "22007", "22009", "22019", "22023", "22039", "22045",
+      "22047", "22053", "22055", "22057", "22077", "22089", "22093", "22095",
+      "22097", "22099", "22101", "22109", "22113", "22121",
+    ],
+  },
+  {
+    id: "central-louisiana",
+    name: "Central Louisiana",
+    desc: "The 10 parishes commonly grouped as Central Louisiana",
+    counties: [
+      "22003", "22011", "22025", "22029", "22043",
+      "22059", "22069", "22079", "22085", "22115",
+    ],
+  },
+  {
+    id: "florida-parishes",
+    name: "Florida Parishes",
+    label: "Florida Parishes (LA)",
+    desc: "The 8 Louisiana parishes east of the Mississippi that were once part of Spanish West Florida",
+    counties: [
+      "22033", "22037", "22063", "22091", "22103", "22105", "22117", "22125",
+    ],
+  },
+  {
+    id: "north-louisiana",
+    name: "North Louisiana",
+    desc: "The 20 parishes commonly grouped as North Louisiana",
+    counties: [
+      "22013", "22015", "22017", "22021", "22027", "22031", "22035", "22041",
+      "22049", "22061", "22065", "22067", "22073", "22081", "22083", "22107",
+      "22111", "22119", "22123", "22127",
+    ],
+  },
+  {
+    id: "ark-la-tex",
+    name: "Ark-La-Tex",
+    desc: "Vernacular region with no official boundaries; this is the common 40-county/parish definition also used as the NWS weather-radar coverage area",
+    counties: [
+      // Louisiana (13 parishes)
+      "22013", "22015", "22017", "22027", "22031", "22049",
+      "22061", "22069", "22081", "22085", "22111", "22119", "22127",
+      // Arkansas (10 counties)
+      "05027", "05057", "05061", "05073", "05081",
+      "05091", "05099", "05103", "05133", "05139",
+      // Oklahoma (1 county)
+      "40089",
+      // Texas (16 counties)
+      "48037", "48063", "48067", "48183", "48203", "48315", "48343", "48347",
+      "48365", "48387", "48401", "48403", "48405", "48419", "48449", "48459",
+    ],
+  },
   {
     id: "delta-ar-ms",
     name: "Delta",
@@ -1010,6 +1080,21 @@ export const PRESETS = [
     desc: "Retrocedes DC to Maryland, which ceded the land in 1791 — unlike Virginia's share, it was never taken back",
     states: ["24"],
     counties: ["11001"],
+  },
+  {
+    id: "spanish-florida",
+    name: "Florida",
+    label: "Spanish Florida (greatest extent)",
+    desc: "Today's Florida plus British/Spanish West Florida's Gulf Coast counties in Alabama and Mississippi and Louisiana's Florida Parishes, all part of the same colony from 1783 to 1810/1821",
+    states: ["12"],
+    counties: [
+      // Alabama
+      "01003", "01097",
+      // Louisiana's Florida Parishes
+      "22033", "22037", "22063", "22091", "22103", "22105", "22117", "22125",
+      // Mississippi
+      "28039", "28045", "28047", "28059", "28109", "28131",
+    ],
   },
 ];
 

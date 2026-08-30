@@ -71,7 +71,7 @@ const NAME_MAX = 15;
 const NAME_MIN = 7;
 const ABBR_MAX = 12;
 const ABBR_MIN = 5.5;
-const LEADER_SIZE = 8;
+const BASE_LEADER_SIZE = 8;
 const NAME_TRACK = 0.15;
 const ABBR_TRACK = 0.08;
 const SIZE_STEP = 0.93; // size search shrinks by 7% per try
@@ -190,7 +190,29 @@ const boxesOverlap = (a, b) => a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < b.y1 && a.y1
 // `name` namespaces the textPath ids: several labelers (the globe map and
 // each inset box) share one SVG document, and an id collision would make a
 // label's <textPath> ride another labeler's path.
-export function createStateLabeler({ group, countyParts, bounds, name }) {
+//
+// Two options exist for the globe renderer (C5), which runs this same pipeline
+// over a MERCATOR raster and then projects the result onto the sphere:
+//
+//   sizeScale(comp)  grid units per map unit at that component's own place on
+//     the raster. Every size constant below is in map units; on an equal-scale
+//     raster the two are the same thing and this is 1, which is the default and
+//     what both the atlas map and the inset boxes pass. Mercator is not equal
+//     scale — it stretches by sec(latitude) — so without this a name fitted at
+//     71N would come out three times the ground size of the same name at the
+//     equator, and Montana would shout over Arizona for no reason. The caps are
+//     multiplied by it going in and `label.scale` carries it back out, so a
+//     consumer divides once and has the size in map units again.
+//   onLayout(labels)  called with each fresh layout. `group` may then be
+//     omitted, and nothing is written to the DOM.
+export function createStateLabeler({
+  group,
+  countyParts,
+  bounds,
+  name,
+  sizeScale = () => 1,
+  onLayout,
+}) {
   // The raster covers `bounds` (map units) at one cell per unit. All the
   // internal math runs in grid coordinates — map coordinates shifted by the
   // grid origin — and an inner group translates the finished labels back, so
@@ -200,7 +222,7 @@ export function createStateLabeler({ group, countyParts, bounds, name }) {
   const W = Math.ceil(bounds.x1) - gx;
   const H = Math.ceil(bounds.y1) - gy;
   const N = W * H;
-  const layer = group.append("g").attr("transform", `translate(${gx},${gy})`);
+  const layer = group?.append("g").attr("transform", `translate(${gx},${gy})`);
 
   // One grid of state indices, one of connected-component ids, and a BFS
   // queue, all allocated once and reused every rebuild.
@@ -596,10 +618,13 @@ export function createStateLabeler({ group, countyParts, bounds, name }) {
       EXTRA_TRACK_MAX * size,
       Math.max(0, (STRETCH_FILL * L - raw) / text.length - track * size)
     );
-    let d = "";
+    // The baseline as points, not as a path string. An SVG consumer formats it
+    // (toSvg); the globe renderer projects it onto the sphere per frame, which
+    // it cannot do with "M12.3 45.6L…".
+    const pts = [];
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (let k = i0; k <= i1; k++) {
-      d += (k === i0 ? "M" : "L") + prof.xs[k].toFixed(1) + " " + prof.ys[k].toFixed(1);
+      pts.push([prof.xs[k], prof.ys[k]]);
       if (prof.xs[k] < x0) x0 = prof.xs[k];
       if (prof.xs[k] > x1) x1 = prof.xs[k];
       if (prof.ys[k] < y0) y0 = prof.ys[k];
@@ -609,7 +634,7 @@ export function createStateLabeler({ group, countyParts, bounds, name }) {
     return {
       kind: "path",
       id: `slb-${name}-${idNum}`,
-      d,
+      pts,
       text,
       size,
       spacing: track * size + extra,
@@ -661,7 +686,7 @@ export function createStateLabeler({ group, countyParts, bounds, name }) {
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     lines.forEach((text, li) => {
       const off = (li - (lines.length - 1) / 2) * STACK_LINE_H * size;
-      let d = "";
+      const pts = [];
       for (let k = i0; k <= i1; k++) {
         const kp = Math.min(i1, k + 1);
         const km = Math.max(i0, k - 1);
@@ -670,7 +695,7 @@ export function createStateLabeler({ group, countyParts, bounds, name }) {
         const tl = Math.hypot(tx, ty) || 1;
         const x = prof.xs[k] - (ty / tl) * off;
         const y = prof.ys[k] + (tx / tl) * off;
-        d += (k === i0 ? "M" : "L") + x.toFixed(1) + " " + y.toFixed(1);
+        pts.push([x, y]);
         if (x < x0) x0 = x;
         if (x > x1) x1 = x;
         if (y < y0) y0 = y;
@@ -681,7 +706,7 @@ export function createStateLabeler({ group, countyParts, bounds, name }) {
         EXTRA_TRACK_MAX * size,
         Math.max(0, (STRETCH_FILL * L - raw) / text.length - track * size)
       );
-      parts.push({ id: `slb-${name}-${idNum}-${li}`, d, text, spacing: track * size + extra });
+      parts.push({ id: `slb-${name}-${idNum}-${li}`, pts, text, spacing: track * size + extra });
     });
     const pad = CLEAR_K * size;
     return {
@@ -722,7 +747,8 @@ export function createStateLabeler({ group, countyParts, bounds, name }) {
   // first safe spot. A watery landing is preferred (pass one); failing that,
   // any spot clear of labels will do (pass two); failing even that, the
   // abbreviation sits on the state with no line at all.
-  function leaderLabel(comp, abbr, placed) {
+  function leaderLabel(comp, abbr, placed, k = 1) {
+    const LEADER_SIZE = BASE_LEADER_SIZE * k;
     // Anchor on comp.cells, not the hull fill: the centroid may sit in a
     // filled bay, but the line itself must start on the state's actual land.
     let bc = comp.cells[0];
@@ -746,7 +772,10 @@ export function createStateLabeler({ group, countyParts, bounds, name }) {
       for (const [dx, dy] of [[D, D], [D, -D], [-D, D], [-D, -D]]) {
         let landCost = 0;
         let exitD = 0;
-        for (let d = 2; d <= LEAD_MAX; d++) {
+        // The march is in map units like every other distance here, so on a
+        // stretched raster it has to stretch with them or a leader would reach
+        // twice as far across the ground as it does on the atlas map.
+        for (let d = 2; d <= LEAD_MAX * k; d++) {
           const x = ax + dx * d;
           const y = ay + dy * d;
           if (x < 1 || y < 1 || x >= W - 1 || y >= H - 1) break;
@@ -874,6 +903,10 @@ export function createStateLabeler({ group, countyParts, bounds, name }) {
       // its profiles for every refit of the same geometry.
       if (!("profA" in comp)) comp.profA = traceBaseline(comp);
       const profA = comp.profA;
+      // Grid units per map unit where this component sits. One number for the
+      // whole label, taken at its centroid — which traceBaseline has just set,
+      // and sets even for a component too small to hold a baseline.
+      const k = sizeScale(comp);
       let label = null;
       if (profA) {
         // When PCA slants the axis, also try a level baseline; the slant only
@@ -893,28 +926,30 @@ export function createStateLabeler({ group, countyParts, bounds, name }) {
             return { prof: profH, fit: fitH };
           return fitA ? { prof: profA, fit: fitA } : null;
         };
-        const namePick = pick(name, NAME_TRACK, NAME_MAX, NAME_MIN);
+        const namePick = pick(name, NAME_TRACK, NAME_MAX * k, NAME_MIN * k);
         // Two stacked level lines beat the one-line label only decisively —
         // and rescue names where one line doesn't fit at all.
         const level = profA.angled ? profH : profA;
         const split = bestSplit(name, NAME_TRACK);
-        const stackFit = split && bestFitLines(level, split, NAME_TRACK, NAME_MAX, NAME_MIN);
+        const stackFit = split && bestFitLines(level, split, NAME_TRACK, NAME_MAX * k, NAME_MIN * k);
         if (stackFit && (!namePick || stackFit.size >= STACK_GAIN * namePick.fit.size))
           label = stackedLabel(level, stackFit, split, NAME_TRACK, idNum++);
         else if (namePick)
           label = curvedLabel(namePick.prof, namePick.fit, name, NAME_TRACK, idNum++);
         else {
-          const abbrPick = pick(abbr, ABBR_TRACK, ABBR_MAX, ABBR_MIN);
+          const abbrPick = pick(abbr, ABBR_TRACK, ABBR_MAX * k, ABBR_MIN * k);
           if (abbrPick) label = curvedLabel(abbrPick.prof, abbrPick.fit, abbr, ABBR_TRACK, idNum++);
         }
       }
       if (label) {
+        label.scale = k;
         labels.push(label);
         placed.push(label.box);
-      } else needLeader.push({ comp, abbr });
+      } else needLeader.push({ comp, abbr, k });
     }
-    for (const { comp, abbr } of needLeader) {
-      const label = leaderLabel(comp, abbr, placed);
+    for (const { comp, abbr, k } of needLeader) {
+      const label = leaderLabel(comp, abbr, placed, k);
+      label.scale = k;
       labels.push(label);
       if (label.box) placed.push(label.box);
       if (label.lineBox) placed.push(label.lineBox);
@@ -922,17 +957,20 @@ export function createStateLabeler({ group, countyParts, bounds, name }) {
     return labels;
   }
 
+  const pathData = (pts) =>
+    pts.map(([x, y], i) => (i ? "L" : "M") + x.toFixed(1) + " " + y.toFixed(1)).join("");
+
   function toSvg(label) {
-    const halo = Math.max(0.9, label.size * 0.13).toFixed(2);
+    const halo = Math.max(1.4, label.size * 0.2).toFixed(2);
     const attrs = (spacing) =>
       `font-size="${label.size.toFixed(2)}" letter-spacing="${spacing.toFixed(2)}" stroke-width="${halo}"`;
-    const onPath = (id, d, spacing, text) =>
-      `<path id="${id}" d="${d}" fill="none"/>` +
+    const onPath = (id, pts, spacing, text) =>
+      `<path id="${id}" d="${pathData(pts)}" fill="none"/>` +
       `<text ${attrs(spacing)} dominant-baseline="central">` +
       `<textPath href="#${id}" startOffset="50%" text-anchor="middle">${esc(text)}</textPath></text>`;
     if (label.kind === "lines")
-      return label.lines.map((ln) => onPath(ln.id, ln.d, ln.spacing, ln.text)).join("");
-    if (label.kind === "path") return onPath(label.id, label.d, label.spacing, label.text);
+      return label.lines.map((ln) => onPath(ln.id, ln.pts, ln.spacing, ln.text)).join("");
+    if (label.kind === "path") return onPath(label.id, label.pts, label.spacing, label.text);
     const common = attrs(label.spacing);
     const line =
       label.x1 !== undefined
@@ -954,7 +992,7 @@ export function createStateLabeler({ group, countyParts, bounds, name }) {
   // per pointer move) rebuilds a few times a second, with a trailing run that
   // settles on the final borders.
   function update(args) {
-    group.attr("display", args.visible ? null : "none");
+    group?.attr("display", args.visible ? null : "none");
     if (!args.visible || args.labelsVersion === builtLabels) return;
     // (labels are written into `layer`, which carries the grid-origin shift)
     const now = performance.now();
@@ -971,8 +1009,13 @@ export function createStateLabeler({ group, countyParts, bounds, name }) {
     }
     lastBuild = now;
     builtLabels = args.labelsVersion;
-    layer.html(build(args).map(toSvg).join(""));
+    const labels = build(args);
+    layer?.html(labels.map(toSvg).join(""));
+    onLayout?.(labels);
   }
 
-  return { update };
+  // Everything a consumer needs to read the layout in its own coordinates: the
+  // labels come out in grid units, which are map units shifted by this origin
+  // (and, where sizeScale is not 1, scaled by each label's own `scale`).
+  return { update, origin: [gx, gy] };
 }

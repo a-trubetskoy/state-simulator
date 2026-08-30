@@ -67,6 +67,14 @@
               <g mask="url(#inset-hole-mask)"><g id="state-labels"></g></g>
               <g id="inset-ui"></g>
               <g id="inset-state-labels"></g>
+              <g id="inset-data-labels"></g>
+              <!-- The data view's symbols. They used to be three deck layers
+                   on the map; on the globe they are the only map content that
+                   is placed from a projected centroid rather than drawn from
+                   the sphere, so they ride the overlay beside the values they
+                   carry. Masked like the labels, so an open inset box covers
+                   them the way it covers the map. -->
+              <g mask="url(#inset-hole-mask)"><g id="data-marks"></g></g>
               <g mask="url(#inset-hole-mask)"><g id="data-labels"></g></g>
               <!-- The split tool's knife line: drawn in map coordinates and
                    carried by the zoom transform, so redrawing it per pointer
@@ -93,7 +101,6 @@
             <div id="map-note" hidden></div>
             <div id="map-tools">
               <button id="reset-view" class="btn btn-small">Reset view</button>
-              <button id="globe" class="btn btn-small" aria-pressed="false" title="Turn the globe: drag the map to face another part of the world">Globe</button>
               <button id="inset-ak" class="btn btn-small" aria-pressed="false" title="Show the Alaska inset">Alaska</button>
               <button id="inset-hi" class="btn btn-small" aria-pressed="false" title="Show the Hawaii inset">Hawaii</button>
             </div>
@@ -132,6 +139,7 @@
                 <div class="stat"><span class="stat-label">GDP per capita</span><b id="v-gdppc"></b><span class="stat-bar"><i id="b-gdppc"></i></span><span id="r-gdppc" class="rank-chip"></span></div>
                 <div class="stat"><span class="stat-label">Median HH income</span><b id="v-mhi"></b><span class="stat-bar"><i id="b-mhi"></i></span><span id="r-mhi" class="rank-chip"></span></div>
                 <div class="stat"><span class="stat-label">Bachelor's degree+</span><b id="v-bach"></b><span class="stat-bar"><i id="b-bach"></i></span><span id="r-bach" class="rank-chip"></span></div>
+                <div class="stat"><span class="stat-label">Life expectancy</span><b id="v-life"></b><span class="stat-bar"><i id="b-life"></i></span><span id="r-life" class="rank-chip"></span></div>
                 <div class="stat"><span class="stat-label">2024 president</span><b id="v-margin"></b>
                   <!-- Lean dial: the band spans D+30 (left) to R+30 (right);
                        the needle clamps at the ends. -->
@@ -179,6 +187,7 @@
                 <option value="gdppc">GDP per capita</option>
                 <option value="mhi">Median HH income</option>
                 <option value="bach">Bachelor's degree+</option>
+                <option value="life">Life expectancy</option>
                 <option value="margin">2024 margin (D&ndash;R)</option>
                 <option value="ev">Electoral votes</option>
                 <option value="wht">% White</option>

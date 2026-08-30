@@ -9,6 +9,7 @@ import {
 } from "@deck.gl/layers";
 import { DataFilterExtension, MaskExtension } from "@deck.gl/extensions";
 import { PRESETS, resolvePreset, partialCounties } from "./presets.js";
+import { createGlobeMap } from "./globe/map.js";
 import { createStateLabeler } from "./labels.js";
 import {
   allocatePieces,
@@ -26,12 +27,29 @@ import "./style.css";
 // province; the rest are their own. Either way a unit paints into the union
 // exactly like a county, so Calgary's division or the whole of Baja
 // California can join a state.
-const [topo, data, overlays] = await Promise.all([
+// The fourth file is scenery: the land beyond the map's own units — South
+// America, Eurasia, Africa, Oceania, Antarctica, Greenland — so that turning
+// the globe shows a world instead of an empty sphere. Nothing about it is
+// paintable, hoverable or countable; it is drawn and that is all.
+const [topo, data, overlays, worldTopo] = await Promise.all([
   fetch("/data/na-counties-topo.json").then((r) => r.json()),
   fetch("/data/na-county-data.json").then((r) => r.json()),
   fetch("/data/na-map-overlays.json").then((r) => r.json()),
+  fetch("/data/world-land.json").then((r) => r.json()),
 ]);
 const counties = feature(topo, topo.objects.counties).features;
+const worldLand = feature(worldTopo, worldTopo.objects.land).features;
+const worldLakes = feature(worldTopo, worldTopo.objects.lakes).features;
+// The scenery's own lines, already told apart by the build so the map doesn't
+// have to: `coast` is every edge where that land meets water, `borders` every
+// edge where it meets another country, `lakeEdges` a lake's true shore with
+// every lake-to-lake seam (Michigan/Huron at the Straits of Mackinac, and
+// others) already dropped. Each is one MultiLineString, so the whole world's
+// coastline projects in a single pass. The Panama seam is in neither of the
+// first two — the map draws its own border there.
+const worldCoast = feature(worldTopo, worldTopo.objects.coast).geometry;
+const worldBorders = feature(worldTopo, worldTopo.objects.borders).geometry;
+const worldLakeMesh = feature(worldTopo, worldTopo.objects.lakeEdges).geometry;
 
 // Land area per unit, in square miles, straight from the same boundary
 // geometry the map draws — not a separately published figure, so it can
@@ -310,7 +328,8 @@ function computeStats(assignMap = assign) {
         sid,
         (s = {
           pop: 0, gdp: 0, landArea: 0, eduT: 0, eduB: 0, dem: 0, gop: 0, tot: 0,
-          incSum: 0, incPop: 0, rT: 0, rW: 0, rB: 0, rN: 0, rA: 0, rH: 0, n: 0,
+          incSum: 0, incPop: 0, lifeSum: 0, lifePop: 0,
+          rT: 0, rW: 0, rB: 0, rN: 0, rA: 0, rH: 0, n: 0,
         })
       );
     }
@@ -325,6 +344,10 @@ function computeStats(assignMap = assign) {
     if (c.mhi) {
       s.incSum += c.mhi * c.pop;
       s.incPop += c.pop;
+    }
+    if (c.life) {
+      s.lifeSum += c.life * c.pop;
+      s.lifePop += c.pop;
     }
     s.rT += c.rT;
     s.rW += c.rW;
@@ -341,6 +364,8 @@ function computeStats(assignMap = assign) {
     // Population-weighted mean of county medians — an approximation, since
     // medians aren't additive.
     s.mhi = s.incPop ? s.incSum / s.incPop : 0;
+    // Same approximation for life expectancy, which isn't additive either.
+    s.life = s.lifePop ? s.lifeSum / s.lifePop : 0;
   }
   apportion(m);
   return m;
@@ -382,7 +407,9 @@ const fmtBigMoney = (thousands) => {
     : "$" + Math.round(d / 1e6) + "M";
 };
 const fmtMoney = (d) => "$" + Math.round(d).toLocaleString("en-US");
+const fmtMoneyK = (d) => "$" + Math.round(d / 1e3) + "k";
 const fmtPct = (p) => p.toFixed(1) + "%";
+const fmtYears = (y) => y.toFixed(1) + " yrs";
 const fmtMargin = (m) =>
   Math.abs(m) < 0.05 ? "Even" : (m > 0 ? "D+" : "R+") + Math.abs(m).toFixed(1);
 const fmtArea = (sqmi) =>
@@ -397,9 +424,10 @@ const STAT_DEFS = {
   pop: { get: (s) => s.pop, fmt: fmtPop, bar: "abs" },
   landArea: { get: (s) => s.landArea, fmt: fmtArea, bar: "abs" },
   gdp: { get: (s) => s.gdp, fmt: fmtBigMoney, has: (s) => s.gdp > 0, bar: "abs" },
-  gdppc: { get: (s) => s.gdppc, fmt: fmtMoney, has: (s) => s.gdp > 0, bar: "abs" },
+  gdppc: { get: (s) => s.gdppc, fmt: fmtMoneyK, has: (s) => s.gdp > 0, bar: "abs" },
   mhi: { get: (s) => s.mhi, fmt: fmtMoney, has: (s) => s.incPop > 0, bar: "abs" },
   bach: { get: (s) => s.bach, fmt: fmtPct, bar: "abs" },
+  life: { get: (s) => s.life, fmt: fmtYears, has: (s) => s.lifePop > 0, bar: "abs" },
   margin: { get: (s) => s.margin, fmt: fmtMargin, has: (s) => s.tot > 0, bar: "diverge" },
   ev: { get: (s) => s.ev, fmt: String, has: (s) => s.ev > 0, bar: "abs" },
   wht: { get: (s) => (s.rT ? (100 * s.rW) / s.rT : 0), fmt: fmtPct, has: (s) => s.rT > 0, bar: "abs" },
@@ -484,6 +512,37 @@ const mainProjection = (rotate) =>
 
 const PROJ = { main: HOME_FIT };
 
+// C7. The globe renderer takes over the main map: the same orthographic view,
+// drawn from geometry that lives on the sphere and turns with a mat3 uniform
+// instead of being re-projected on the CPU. Everything else on this page is
+// unchanged — the model, the stats, the sidebar, the presets, and the two inset
+// boxes, which keep the deck.gl path and their own fixed cameras.
+//
+// `?deck` puts the old renderer back. That is not a hedge: the plan's decision
+// point after C3 is "does it look identical to the current map side by side",
+// and nothing else can answer it. C8 deletes the loser.
+const USE_GLOBE = !/[?&]deck\b/.test(location.search);
+const globeMap = USE_GLOBE
+  ? await createGlobeMap({ canvas: document.getElementById("map-canvas"), features: counties })
+  : null;
+if (globeMap) {
+  // The compiler fits the same projection to the same lower-48 features, so
+  // this is a tautology until one of the two files changes and it stops being
+  // one — at which point every pixel is half a continent out and nothing else
+  // would say so.
+  const cam = globeMap.geometry.camera;
+  const off = Math.max(
+    Math.abs(cam.globeScale - GLOBE_SCALE),
+    Math.abs(cam.globeTranslate[0] - GLOBE_TRANSLATE[0]),
+    Math.abs(cam.globeTranslate[1] - GLOBE_TRANSLATE[1])
+  );
+  if (off > 1e-6)
+    throw new Error(
+      `the compiled globe is fitted at ${cam.globeScale}/${cam.globeTranslate} and this map at ` +
+        `${GLOBE_SCALE}/${GLOBE_TRANSLATE} — rerun npm run data:geometry`
+    );
+}
+
 const makeTracer = (projection) => {
   const recorded = [];
   let line = null;
@@ -503,7 +562,10 @@ const makeTracer = (projection) => {
     return recorded.slice();
   };
 };
-const tracers = { main: makeTracer(PROJ.main) }; // ak/hi registered below
+// ak/hi are registered below; "spin" is registered per frame while the globe
+// is being turned, since the preview projects through a facing the rest of
+// the map has not been baked to yet.
+const tracers = { main: makeTracer(PROJ.main) };
 
 // Every ring or line the projection emitted for one GeoJSON geometry.
 function projectLines(geometry, region = "main") {
@@ -571,8 +633,16 @@ const borderPaths = [];
 const edgeBandPaths = [];
 const arcPaths = [];
 const apronParts = [];
-// Globe furniture, drawn only in globe mode (see globeMode): the ocean disc
-// and the graticule. The disc is analytic and rotation-independent — an
+// The scenery land, its lakes, and its two sets of lines. Globe copies only:
+// the two inset boxes are framed tight on Alaska and Hawaii, so nothing beyond
+// the map's own units reaches them.
+const worldParts = [];
+const worldLakeParts = [];
+const worldLakeEdges = [];
+const worldCoastPaths = [];
+const worldBorderPaths = [];
+// Globe furniture: the ocean disc and the graticule. The disc is analytic
+// and rotation-independent — an
 // orthographic sphere always projects to a circle of radius `scale` about
 // `translate`, and both are frozen — so it is built once. The graticule is
 // re-baked with everything else, since its lines do move with the facing.
@@ -619,6 +689,15 @@ const HOME_TRANSFORM = d3.zoomIdentity;
 // bounds — a full-disc raster would be several times the cells for ocean.
 const MAP_BOUNDS = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
 function computeMapBounds() {
+  // On the globe there is no baked geometry to measure, and no bake to hang
+  // this off either: the facing changes every frame of a drag. A coarse point
+  // set over the unit outlines, projected through the current rotation, is the
+  // same answer for three orders of magnitude less work — a bound only cares
+  // about extremes. See the plan's C7 note, which left this open.
+  if (globeMap) {
+    Object.assign(MAP_BOUNDS, globeMap.landBounds());
+    return;
+  }
   MAP_BOUNDS.x0 = MAP_BOUNDS.y0 = Infinity;
   MAP_BOUNDS.x1 = MAP_BOUNDS.y1 = -Infinity;
   for (const p of countyParts) {
@@ -716,25 +795,41 @@ INSETS.hi = inset(INSETS.ak.x + INSETS.ak.w + INSET_GAP, 195, 120, "Hawaii");
 const partsByFips = new Map();
 const mainCountyParts = [];
 
-// Area-weighted centroid of each county in map coordinates (globe copies
-// only), for placing the data view's scaled symbols.
+// Area-weighted centroid of each county in map coordinates: the globe copies
+// for placing the data view's scaled symbols, and each inset's own copies
+// (insetCountyGeo) for the same job inside the Alaska/Hawaii boxes.
 const countyGeo = new Map();
+const insetCountyGeo = { ak: new Map(), hi: new Map() };
 function computeCountyGeo() {
   countyGeo.clear();
+  insetCountyGeo.ak.clear();
+  insetCountyGeo.hi.clear();
+  // The globe's own centroids for the main map — one weighted sum per unit over
+  // its compiled triangles, computed once and re-projected per facing, with the
+  // far side of the world left out the way clipping used to leave it out. The
+  // two inset boxes keep their fixed projections, so their copies still come
+  // from the parts below.
+  const targets = globeMap
+    ? { ak: insetCountyGeo.ak, hi: insetCountyGeo.hi }
+    : { main: countyGeo, ak: insetCountyGeo.ak, hi: insetCountyGeo.hi };
+  if (globeMap) for (const [fips, g] of globeMap.centroids()) countyGeo.set(fips, g);
   for (const [fips, parts] of partsByFips) {
-    let area = 0;
-    let x = 0;
-    let y = 0;
+    const acc = {};
     for (const p of parts) {
-      if (p.region !== "main") continue;
       const a = Math.abs(d3.polygonArea(p.rings[0]));
       if (!a) continue;
       const [cx, cy] = d3.polygonCentroid(p.rings[0]);
-      area += a;
-      x += cx * a;
-      y += cy * a;
+      const t = acc[p.region] ?? (acc[p.region] = { x: 0, y: 0, a: 0 });
+      t.x += cx * a;
+      t.y += cy * a;
+      t.a += a;
     }
-    if (area) countyGeo.set(fips, { x: x / area, y: y / area, area });
+    for (const region in acc) {
+      const target = targets[region];
+      if (!target) continue;
+      const t = acc[region];
+      target.set(fips, { x: t.x / t.a, y: t.y / t.a, area: t.a });
+    }
   }
 }
 // ------------------------------------------------------------------- baking
@@ -756,53 +851,6 @@ function computeCountyGeo() {
 // the seam aprons to land. Globe only — each inset gets a plain white box as
 // its backing instead.
 const NATION_GEOMETRY = merge(topo, topo.objects.counties.geometries);
-
-// A coarse copy of that land shape, for the frames of a spin. A full bake is
-// ~130 ms — fine for the one settle at the end of a drag, hopeless at 60 fps —
-// and the cost is dominated by per-geometry stream overhead across thousands
-// of counties and arcs, so thinning the full map does not help. One already
-// merged outline, thinned, is few enough geometries and few enough points to
-// re-project per frame. Rings are never cut below four points, so an island
-// cannot collapse to a degenerate sliver mid-drag.
-const SPIN_LAND = (() => {
-  // Two cuts, and the second is the one that pays. Thinning alone barely
-  // helps: most of the merged outline's rings are already short — every lake
-  // islet and offshore rock the source draws — so a stride hits its
-  // don't-collapse floor on thousands of them and the point count hardly
-  // moves. Dropping those rings outright is what makes the preview cheap, and
-  // a speck below a quarter degree is invisible at any zoom a spin happens at.
-  const STEP = 8;
-  const MIN_DEG = 0.25;
-  const spans = (ring) => {
-    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    for (const [x, y] of ring) {
-      if (x < x0) x0 = x;
-      if (x > x1) x1 = x;
-      if (y < y0) y0 = y;
-      if (y > y1) y1 = y;
-    }
-    return Math.max(x1 - x0, y1 - y0) >= MIN_DEG;
-  };
-  const thin = (ring) => {
-    if (ring.length <= STEP + 2) return ring;
-    const out = [];
-    for (let i = 0; i < ring.length; i += STEP) out.push(ring[i]);
-    if (out[out.length - 1] !== ring[ring.length - 1]) out.push(ring[ring.length - 1]);
-    return out.length >= 4 ? out : ring;
-  };
-  const polys =
-    NATION_GEOMETRY.type === "Polygon"
-      ? [NATION_GEOMETRY.coordinates]
-      : NATION_GEOMETRY.coordinates;
-  const kept = [];
-  for (const rings of polys) {
-    // The outer ring decides whether the polygon appears at all; holes are
-    // judged on their own, so a big lake stays a hole and a pond does not.
-    if (!spans(rings[0])) continue;
-    kept.push([rings[0], ...rings.slice(1).filter(spans)].map(thin));
-  }
-  return { type: "MultiPolygon", coordinates: kept };
-})();
 
 // One record per shared boundary segment, carrying the counties on either
 // side. The hairline/state-border layer and the band mask draw from this
@@ -920,6 +968,11 @@ function bakeMain() {
   const out = {
     countyParts: counties.flatMap((f) => projectParts(f.geometry, { fips: f.id, region: "main" })),
     nationParts: projectParts(NATION_GEOMETRY, { region: "main" }),
+    worldParts: worldLand.flatMap((f) => projectParts(f.geometry, { region: "main" })),
+    worldLakeParts: worldLakes.flatMap((f) => projectParts(f.geometry, { region: "main" })),
+    worldCoastPaths: projectLines(worldCoast, "main").map((path) => ({ path, region: "main" })),
+    worldBorderPaths: projectLines(worldBorders, "main").map((path) => ({ path, region: "main" })),
+    worldLakeEdgePaths: projectLines(worldLakeMesh, "main").map((path) => ({ path, region: "main" })),
     lakesUnder: [],
     lakesOver: [],
     arcPaths: [],
@@ -1046,6 +1099,11 @@ function assembleBake(main) {
   };
   put(countyParts, main.countyParts, INSET_BAKE.countyParts);
   put(nationParts, main.nationParts);
+  put(worldParts, main.worldParts);
+  put(worldLakeParts, main.worldLakeParts);
+  put(worldLakeEdges, main.worldLakeEdgePaths);
+  put(worldCoastPaths, main.worldCoastPaths);
+  put(worldBorderPaths, main.worldBorderPaths);
   put(lakeParts.under, main.lakesUnder, INSET_BAKE.lakesUnder);
   put(lakeParts.over, main.lakesOver, INSET_BAKE.lakesOver);
   put(lakeEdges.under, closedRings(lakeParts.under));
@@ -1333,6 +1391,11 @@ function rebuildDerived() {
   MAIN.arcPaths = arcPaths.filter(isMain);
   MAIN.bandMaskPaths = bandMaskPaths.filter(isMain);
   MAIN.nationParts = nationParts.slice();
+  MAIN.worldParts = worldParts.slice();
+  MAIN.worldLakeParts = worldLakeParts.slice();
+  MAIN.worldLakeEdges = worldLakeEdges.slice();
+  MAIN.worldCoastPaths = worldCoastPaths.slice();
+  MAIN.worldBorderPaths = worldBorderPaths.slice();
   MAIN.coastPaths = coastPaths.filter(isMain);
   MAIN.shorePaths = shorePaths.filter(isMain);
   MAIN.borderPaths = borderPaths.filter(isMain);
@@ -1390,6 +1453,13 @@ const FOREIGN_LAND = rgba("#f4f0e9");
 // keeps reading as the subject and the sphere as its ground.
 const OCEAN = rgba("#e8f1f7");
 const GRATICULE_LINE = rgba("#b9cfdf", 150);
+// The scenery land beyond the map's units wears exactly what a non-union unit
+// wears: the same tan, the same white hairline between neighbours, the same
+// blue shoreline and halo, the same water blue in its lakes. There is no
+// second style for "not the map" — what marks the map out is that its ground
+// carries state colors, hover, labels and paint, and none of that reaches
+// here. A tan of its own only put a seam across the Panama border.
+const WORLD_LAND = rgba(FOREIGN_FILL);
 
 // The band inside a state's border is the state's own fill pushed deeper: the
 // same hue, more saturated (capped at 1) and darker by the usual multiplier.
@@ -1469,6 +1539,11 @@ const LABEL_MARGIN = 24;
 // <textPath> defs and text go with it.
 function makeMainLabeler() {
   stateLabelGroup.selectAll("*").remove();
+  // C5 does this job on the globe, over a Mercator raster, and keeps the answer
+  // in lon/lat so a turn re-projects the baselines instead of re-running the
+  // layout. The two inset boxes keep the SVG labeler below: their projections
+  // never move, so nothing about them wants baking to the sphere.
+  if (globeMap) return { update: (args) => globeMap.updateLabels(args) };
   return createStateLabeler({
     group: stateLabelGroup,
     name: "main",
@@ -1491,6 +1566,12 @@ let stateLabeler = makeMainLabeler();
 // two boxes hide independently.
 const insetLabelGroup = svg.select("#inset-state-labels");
 const insetMaskHoles = svg.select("#inset-mask-holes");
+// The data-view counterpart: one text per state's value, positioned from the
+// inset's own county duplicates (see insetCountyGeo) instead of the globe
+// copies renderDataLabels uses for #data-labels. Rides the same transform as
+// the name labels above, so it stays pinned with the boxes. Its font-size is
+// set below, once LABEL_SIZE exists.
+const insetDataLabelGroup = svg.select("#inset-data-labels");
 const insetLabelers = {};
 for (const key of ["ak", "hi"]) {
   const b = INSETS[key];
@@ -1508,9 +1589,6 @@ let viewHeight = Math.max(1, mapWrap.clientHeight);
 // section, where the projected shapes it derives from live.
 let transform = HOME_TRANSFORM;
 let hoverFips = null;
-// Globe mode: the sphere and graticule draw, and dragging the map turns the
-// globe instead of panning it. Off by default, so the atlas view is untouched.
-let globeMode = false;
 let mapVersion = 0; // bumped whenever fills or borders change
 // The state labels read far fewer inputs than the map does, and their rebuild
 // is the most expensive step of a refresh (a continent-wide raster), so they
@@ -1567,6 +1645,22 @@ let insetDeck;
 // visible tint against the white page.
 const seqColor = (t) => rgba(d3.interpolateYlGnBu(0.08 + 0.84 * t));
 const divColor = (t) => rgba(d3.interpolateRdBu(0.08 + 0.84 * t));
+const clamp01 = (t) => Math.max(0, Math.min(1, t));
+
+// Drops Tukey outliers (often DC, on a per-capita stat) before a choropleth's
+// min/max or ends get sized, so one extreme state can't stretch the ramp and
+// flatten it for everyone else. The outlier itself is still painted — its
+// color just clamps to the ramp's deepest end instead of sitting mid-scale.
+function trimOutliers(vals) {
+  if (vals.length < 4) return vals;
+  const sorted = [...vals].sort((a, b) => a - b);
+  const q1 = d3.quantileSorted(sorted, 0.25);
+  const q3 = d3.quantileSorted(sorted, 0.75);
+  const iqr = q3 - q1;
+  if (iqr <= 0) return vals;
+  const trimmed = sorted.filter((v) => v >= q1 - 1.5 * iqr && v <= q3 + 1.5 * iqr);
+  return trimmed.length >= 2 ? trimmed : vals;
+}
 
 // The data view covers the union only. Units still outside it stay out of
 // every reading — fills, marks, labels, the legend's ends — so a populous
@@ -1583,14 +1677,15 @@ function choroplethFills(key) {
   const def = STAT_DEFS[key];
   const entries = statEntries(def);
   const vals = entries.map(([, s]) => def.get(s));
+  const trimmed = trimOutliers(vals);
   const fills = new Map();
   if (def.bar === "diverge") {
-    const m = Math.max(1e-9, ...vals.map(Math.abs));
-    for (const [sid, s] of entries) fills.set(sid, divColor((def.get(s) / m + 1) / 2));
+    const m = Math.max(1e-9, ...trimmed.map(Math.abs));
+    for (const [sid, s] of entries) fills.set(sid, divColor(clamp01((def.get(s) / m + 1) / 2)));
   } else {
-    const lo = Math.min(...vals);
-    const span = Math.max(1e-9, Math.max(...vals) - lo);
-    for (const [sid, s] of entries) fills.set(sid, seqColor((def.get(s) - lo) / span));
+    const lo = Math.min(...trimmed);
+    const span = Math.max(1e-9, Math.max(...trimmed) - lo);
+    for (const [sid, s] of entries) fills.set(sid, seqColor(clamp01((def.get(s) - lo) / span)));
   }
   return fills;
 }
@@ -1610,11 +1705,13 @@ for (const [sid, s] of computeStats()) {
 }
 
 // sid -> the area-weighted centroid of the state's counties: where a state's
-// symbol sits, and where its choropleth label goes.
-function stateCentroids() {
+// symbol sits, and where its choropleth label goes. Takes countyGeo by
+// default (the globe copies); passing insetCountyGeo.ak/.hi gives the same
+// centroids inside an inset box instead.
+function stateCentroids(geo = countyGeo) {
   const acc = new Map();
   for (const [fips, sid] of assign) {
-    const g = countyGeo.get(fips);
+    const g = geo.get(fips);
     if (!g) continue;
     let t = acc.get(sid);
     if (!t) acc.set(sid, (t = { x: 0, y: 0, a: 0 }));
@@ -1654,12 +1751,12 @@ function symbolData(key) {
   return symbolCache.marks;
 }
 
-function computeSymbolData(key) {
+function computeSymbolData(key, centroids = stateCentroids()) {
   const stats = getStats();
   const mark = SYMBOL_STATS[key].mark;
   const max = mark === "square" ? SQUARE_MAX_SIDE / 2 : CIRCLE_MAX_R;
   const out = [];
-  for (const [sid, c] of stateCentroids()) {
+  for (const [sid, c] of centroids) {
     if (stateInfo.get(sid)?.foreign) continue; // marks are for the union only
     const v = stats.get(sid)?.[key] ?? 0;
     if (!(v > 0)) continue;
@@ -1755,6 +1852,13 @@ function spreadMarks(points, circle) {
 const LABEL_SIZE = 9; // viewBox units; the font-family and halo live in the CSS
 const LABEL_CHAR_W = 0.62; // Verdana digit advance as a fraction of font size
 labelGroup.attr("font-size", LABEL_SIZE);
+// The inset group rides a fixed pin, not the zoom (see placeInsetUi), so its
+// text renders at a constant CSS pixel size while the globe labels above grow
+// and shrink with the map's fit and zoom. LABEL_SIZE was tuned against the
+// globe at its usual on-screen scale, which reads small pinned at 1:1 — this
+// runs bigger to land at a comparable size in the boxes.
+const INSET_LABEL_SIZE = 15;
+insetDataLabelGroup.attr("font-size", INSET_LABEL_SIZE);
 
 // A label sits inside its mark only while the mark stands taller than 120%
 // of the text; any shorter and the label would bury the mark, so it drops to
@@ -1767,12 +1871,11 @@ const LABEL_INSIDE_MIN = 1.2 * LABEL_SIZE; // mark height, viewBox units
 // box stands in for the mark. States the fill skips for lack of data get no
 // label either. Each label also learns whether its state's fill is dark, so
 // the renderer can flip it to white-on-black for readability.
-function choroplethLabels(key) {
+function choroplethLabels(key, centroids = stateCentroids(), fills = choroplethFills(key)) {
   const def = STAT_DEFS[key];
   const stats = getStats();
-  const fills = choroplethFills(key);
   const out = [];
-  for (const [sid, c] of stateCentroids()) {
+  for (const [sid, c] of centroids) {
     const s = stats.get(sid);
     if (stateInfo.get(sid)?.foreign || !s || s.n === 0 || (def.has && !def.has(s))) continue;
     const v = def.get(s);
@@ -1790,6 +1893,40 @@ function choroplethLabels(key) {
   return spreadMarks(out, false);
 }
 
+// The data view's marks, as SVG over the map. On the deck path these are three
+// layers in the map stack (data-circles, data-squares, data-dots); the globe
+// draws nothing that is placed from a projected centroid, so they move up here
+// beside the values they carry and are laid out from exactly the same
+// symbolData. Widths are in design units, which is what deck's "common" units
+// meant, and the group rides d3.zoom's transform like every other overlay.
+const markGroup = d3.select("#data-marks");
+const cssRgba = ([r, g, b, a = 255]) => `rgba(${r},${g},${b},${a / 255})`;
+function renderDataMarks(symbol, marks) {
+  const shapes = !symbol
+    ? []
+    : symbol.mark === "dots"
+      ? dotPositions(marks).map((d) => ({ cx: d.x, cy: d.y, r: DOT_R, w: 0.5 }))
+      : symbol.mark === "circle"
+        ? marks.map((d) => ({ cx: d.x, cy: d.y, r: d.hw, w: 1 }))
+        : marks.map((d) => ({ x: d.x - d.hw, y: d.y - d.hw, s: 2 * d.hw, w: 1 }));
+  markGroup.attr("fill", symbol ? cssRgba(symbol.fill) : "none");
+  markGroup.attr("stroke", symbol ? cssRgba(symbol.edge) : "none");
+  markGroup
+    .selectAll(symbol?.mark === "square" ? "rect" : "circle")
+    .data(shapes)
+    .join(symbol?.mark === "square" ? "rect" : "circle")
+    .attr("stroke-width", (d) => d.w)
+    .attr("cx", (d) => d.cx)
+    .attr("cy", (d) => d.cy)
+    .attr("r", (d) => d.r)
+    .attr("x", (d) => d.x)
+    .attr("y", (d) => d.y)
+    .attr("width", (d) => d.s)
+    .attr("height", (d) => d.s);
+  // Joining on one tag leaves the other kind behind when the stat changes.
+  markGroup.selectAll(symbol?.mark === "square" ? "circle" : "rect").remove();
+}
+
 let labelKey = "";
 function renderDataLabels() {
   const statKey = rankStatSel.value;
@@ -1798,21 +1935,44 @@ function renderDataLabels() {
   labelKey = key;
   const fmt = STAT_DEFS[statKey].fmt;
   const symbol = SYMBOL_STATS[statKey];
-  const marks = !key ? [] : symbol ? symbolData(statKey) : choroplethLabels(statKey);
-  const labels = marks.map((d) => {
-    // A dot grid never takes an inside label: text across the pattern would
-    // cover some of the countable dots.
-    const below = symbol && (symbol.mark === "dots" || 2 * d.hh <= LABEL_INSIDE_MIN);
-    return {
-      text: fmt(d.v),
-      dark: !!d.dark,
-      x: d.x,
-      y: below ? d.y + d.hh + LABEL_SIZE * 0.75 : d.y,
-    };
-  });
+  const fills = key && !symbol ? choroplethFills(statKey) : null;
+  const toLabels = (marks) =>
+    marks.map((d) => {
+      // A dot grid never takes an inside label: text across the pattern would
+      // cover some of the countable dots.
+      const below = symbol && (symbol.mark === "dots" || 2 * d.hh <= LABEL_INSIDE_MIN);
+      return {
+        text: fmt(d.v),
+        dark: !!d.dark,
+        x: d.x,
+        y: below ? d.y + d.hh + LABEL_SIZE * 0.75 : d.y,
+      };
+    });
+
+  const marks = !key ? [] : symbol ? symbolData(statKey) : choroplethLabels(statKey, stateCentroids(), fills);
+  if (globeMap) renderDataMarks(key && symbol ? symbol : null, marks);
   labelGroup
     .selectAll("text")
-    .data(labels)
+    .data(toLabels(marks))
+    .join("text")
+    .classed("inverse", (d) => d.dark)
+    .attr("x", (d) => d.x)
+    .attr("y", (d) => d.y)
+    .text((d) => d.text);
+
+  // Each inset box runs the same pipeline over its own county duplicates
+  // (insetCountyGeo) instead of the globe copies above, skipped while the
+  // box is collapsed — same stat and fills, so a state reads the same number
+  // and color whether it's the globe copy or the inset one.
+  const insetMarks = (region) =>
+    !key || insetHidden[region]
+      ? []
+      : symbol
+        ? computeSymbolData(statKey, stateCentroids(insetCountyGeo[region]))
+        : choroplethLabels(statKey, stateCentroids(insetCountyGeo[region]), fills);
+  insetDataLabelGroup
+    .selectAll("text")
+    .data(["ak", "hi"].flatMap((region) => toLabels(insetMarks(region))))
     .join("text")
     .classed("inverse", (d) => d.dark)
     .attr("x", (d) => d.x)
@@ -1838,6 +1998,25 @@ function hoverParts() {
       parts: [...partsByFips].flatMap(([f, parts]) => (assign.get(f) === sid ? parts : [])),
     };
   return hoverStateCache.parts;
+}
+
+// The same question for the globe, which tints by unit rather than by
+// projected part: the county under the pointer, or in data view every county
+// of its state, since county lines aren't drawn there and the reading is the
+// state's. Cached on the answer's inputs, so a mouse move inside one state
+// costs a comparison.
+let hoverUnitCache = { key: "", list: EMPTY };
+function hoverUnits() {
+  if (!hoverFips) return EMPTY;
+  if (!inDataView()) return [hoverFips];
+  const sid = assign.get(hoverFips);
+  const key = `${sid}:${assignVersion}`;
+  if (hoverUnitCache.key !== key) {
+    const list = [];
+    for (const [fips, s] of assign) if (s === sid) list.push(fips);
+    hoverUnitCache = { key, list };
+  }
+  return hoverUnitCache.list;
 }
 
 // deck.gl compares layer data by reference, so these two arrays have to be the
@@ -1919,17 +2098,17 @@ const insetHoverLayer = (data) =>
     ...FLAT,
   });
 
-// Builds both decks' layer lists in one pass, so the inset stack shares the
-// accessors (fills, bands, filters) with the globe stack.
-function buildLayers() {
-  const trigger = mapVersion;
+// What colour a state's ground and its border band wear right now. Pulled out
+// of buildLayers so the globe renderer reads exactly the same definitions: the
+// deck path calls these per projected part, the globe writes each answer into
+// one palette texel per unit (see paintGlobe). Memoized per call, because a
+// refresh asks about the same fifty-odd states thousands of times.
+function groundColors() {
   const dataView = inDataView();
   const statKey = rankStatSel.value;
   const symbol = dataView ? SYMBOL_STATS[statKey] : undefined;
-  const symbols = symbol ? symbolData(statKey) : EMPTY;
   const fills = new Map();
-  const fillOf = (part) => {
-    const sid = assign.get(part.fips);
+  const fillOf = (sid) => {
     const dim = paintMode && sid !== selected;
     const hot = sid === selected;
     const key = dim ? sid + "!" : hot ? sid + "*" : sid;
@@ -1941,8 +2120,7 @@ function buildLayers() {
     return color;
   };
   const bands = new Map();
-  const bandOf = (part) => {
-    const sid = assign.get(part.fips);
+  const bandOf = (sid) => {
     const dim = paintMode && sid !== selected;
     const hot = sid === selected;
     const key = dim ? sid + "!" : hot ? sid + "*" : sid;
@@ -1964,13 +2142,72 @@ function buildLayers() {
   // else colors each county by its state's value. Units outside the union
   // keep the atlas tan in both cases — they read as context, never as data.
   const choro = dataView && !symbol ? choroplethFills(statKey) : null;
-  const countyFill = !dataView
+  const groundOf = !dataView
     ? fillOf
-    : (part) => {
-        const sid = assign.get(part.fips);
+    : (sid) => {
         if (stateInfo.get(sid)?.foreign) return FOREIGN_LAND;
         return choro ? (choro.get(sid) ?? NO_DATA) : GREY_LAND;
       };
+  return { fillOf, bandOf, groundOf, dataView, statKey, symbol, choro };
+}
+
+// deck.gl takes 0-255 bytes and GLSL takes 0-1 floats.
+const glColor = ([r, g, b, a = 255]) => [r / 255, g / 255, b / 255, a / 255];
+
+// The globe's whole repaint: three texels per unit and nothing else. No
+// geometry moves when a county changes hands, a state is selected, paint mode
+// dims the rest of the map or the view flips to data — which is what the
+// palette and the per-unit attribute table were built for.
+function paintGlobe() {
+  const { bandOf, groundOf, dataView } = groundColors();
+  // A small dense index per state, so the shader can compare two units'
+  // owners with one integer test. Rebuilt per repaint; there are ~60 states.
+  const stateOrder = new Map([...stateInfo.keys()].map((sid, i) => [sid, i]));
+  globeMap.paint({
+    assign,
+    stateOrder,
+    fillOf: groundOf,
+    // The band is drawn through a stencil stroked along the state borders, so
+    // in the data view — where there are no bands — nothing reads this.
+    bandOf: dataView ? groundOf : bandOf,
+    isForeign: (sid) => !!stateInfo.get(sid)?.foreign,
+    selected,
+  });
+  globeMap.setView({
+    dataView,
+    selected: !!selected,
+    // The atlas outline is the selected state's own colour pushed darker; in
+    // data view that colour means nothing, so a neutral dark line marks it.
+    selectionColor: selected
+      ? glColor(dataView ? rgba("#333333") : rgba(d3.color(stateInfo.get(selected).color).darker(1.4)))
+      : undefined,
+  });
+  globeMap.requestDraw();
+}
+
+// Builds both decks' layer lists in one pass, so the inset stack shares the
+// accessors (fills, bands, filters) with the globe stack.
+function buildLayers() {
+  const trigger = mapVersion;
+  const dataView = inDataView();
+  const statKey = rankStatSel.value;
+  const symbol = dataView ? SYMBOL_STATS[statKey] : undefined;
+  const symbols = symbol ? symbolData(statKey) : EMPTY;
+  // Each open inset gets its own marks, sized and placed from its own county
+  // duplicates (insetCountyGeo) rather than the globe copies above — the
+  // same reasoning as the inset data labels.
+  const insetSymbols = symbol
+    ? ["ak", "hi"].flatMap((region) =>
+        insetHidden[region] ? [] : computeSymbolData(statKey, stateCentroids(insetCountyGeo[region]))
+      )
+    : EMPTY;
+  // Keyed by state, not by part: the deck layers below look one up per record,
+  // and the globe writes each one into the palette once per unit. Same
+  // definitions either way — see groundColors.
+  const { fillOf: fillForState, bandOf: bandForState, groundOf } = groundColors();
+  const fillOf = (part) => fillForState(assign.get(part.fips));
+  const bandOf = (part) => bandForState(assign.get(part.fips));
+  const countyFill = (part) => groundOf(assign.get(part.fips));
 
   const isBorder = (d) => assign.get(d.a) !== assign.get(d.b);
   // County hairlines and state borders share one layer per deck: same arc
@@ -2024,23 +2261,98 @@ function buildLayers() {
 
   const mapLayers = [
     // Globe furniture, under everything: the ocean disc is the sphere itself,
-    // and the graticule rides on it. Both are off in the atlas view, which
-    // therefore looks exactly as it always did — the globe is a mode, not a
-    // new default.
+    // and the graticule rides on it.
     new SolidPolygonLayer({
       id: "globe-sphere",
-      data: globeMode ? [SPHERE_DISC] : EMPTY,
+      data: [SPHERE_DISC],
       getPolygon: (d) => d.rings,
       getFillColor: OCEAN,
       ...FLAT,
     }),
     new PathLayer({
       id: "globe-graticule",
-      data: globeMode ? MAIN.graticulePaths : EMPTY,
+      data: MAIN.graticulePaths,
       getPath: (d) => d.path,
       getColor: GRATICULE_LINE,
       getWidth: 0.7,
       widthUnits: "common",
+      ...FLAT,
+    }),
+    // The rest of the world, under everything the map proper draws. It is
+    // scenery in both views: the sphere is bare without it. The map's own
+    // units cover none of it — the build leaves out every country the map
+    // draws — so nothing overlaps and no seam shows.
+    //
+    // The six layers are the map's own stack in miniature, in the same order
+    // and the same colors: halo under the land, then the fill, the lines
+    // between countries, the lakes over them, and the shoreline last. What it
+    // leaves out is everything that belongs to a paintable unit — no border
+    // band, no selection, no hover, no state line.
+    new PathLayer({
+      id: "world-coast-halo",
+      data: MAIN.worldCoastPaths,
+      visible: !dataView,
+      getPath: (d) => d.path,
+      getColor: HALO,
+      getWidth: 16,
+      widthUnits: "pixels",
+      jointRounded: true,
+      capRounded: true,
+      ...FLAT,
+    }),
+    new SolidPolygonLayer({
+      id: "world-land",
+      data: MAIN.worldParts,
+      getPolygon: (d) => d.rings,
+      getFillColor: dataView ? FOREIGN_LAND : WORLD_LAND,
+      ...FLAT,
+    }),
+    // Country lines, like the county hairlines they match: gone in data view,
+    // where the ground is read by color and a line inside it would only break
+    // the wash up.
+    new PathLayer({
+      id: "world-borders",
+      data: MAIN.worldBorderPaths,
+      visible: !dataView,
+      getPath: (d) => d.path,
+      getColor: COUNTY_LINE,
+      getWidth: 1,
+      widthUnits: "pixels",
+      capRounded: true,
+      ...FLAT,
+    }),
+    // Natural Earth carves the largest lakes out of the countries it draws and
+    // leaves the rest sitting inside them, so these are drawn over the land
+    // either way: over a hole they fill it, over a country they cover it. Both
+    // read the same, which is what the map's own two lake layers achieve
+    // between them.
+    new SolidPolygonLayer({
+      id: "world-lakes",
+      data: MAIN.worldLakeParts,
+      getPolygon: (d) => d.rings,
+      getFillColor: dataView ? WHITE : LAKE,
+      ...FLAT,
+    }),
+    new PathLayer({
+      id: "world-lake-edges",
+      data: MAIN.worldLakeEdges,
+      getPath: (d) => d.path,
+      getColor: COAST,
+      getWidth: 1.1,
+      widthUnits: "pixels",
+      jointRounded: true,
+      capRounded: true,
+      ...FLAT,
+    }),
+    new PathLayer({
+      id: "world-coast-line",
+      data: MAIN.worldCoastPaths,
+      getPath: (d) => d.path,
+      getColor: COAST,
+      getWidth: 1.1,
+      widthUnits: "pixels",
+      jointRounded: true,
+      capRounded: true,
       ...FLAT,
     }),
     // Water first: lakes the Census file carves out of the land, then a soft
@@ -2446,6 +2758,54 @@ function buildLayers() {
       capRounded: true,
       ...FLAT,
     }),
+    // Data view symbols, the same three marks as the globe stack, mirrored
+    // over insetSymbols so a state's graduated bubble/square/dots shows up
+    // inside its box too, not just on the (often out-of-view) globe copy.
+    new ScatterplotLayer({
+      id: "inset-data-circles",
+      data: symbol?.mark === "circle" ? insetSymbols : EMPTY,
+      getPosition: (d) => [d.x, d.y],
+      getRadius: (d) => d.hw,
+      radiusUnits: "common",
+      stroked: true,
+      getFillColor: symbol?.fill ?? WHITE,
+      getLineColor: symbol?.edge ?? WHITE,
+      getLineWidth: 1,
+      lineWidthUnits: "common",
+      ...FLAT,
+    }),
+    new PolygonLayer({
+      id: "inset-data-squares",
+      data: symbol?.mark === "square" ? insetSymbols : EMPTY,
+      getPolygon: (d) => {
+        const h = d.hw;
+        return [
+          [d.x - h, d.y - h],
+          [d.x + h, d.y - h],
+          [d.x + h, d.y + h],
+          [d.x - h, d.y + h],
+        ];
+      },
+      stroked: true,
+      getFillColor: symbol?.fill ?? WHITE,
+      getLineColor: symbol?.edge ?? WHITE,
+      getLineWidth: 1,
+      lineWidthUnits: "common",
+      ...FLAT,
+    }),
+    new ScatterplotLayer({
+      id: "inset-data-dots",
+      data: symbol?.mark === "dots" ? dotPositions(insetSymbols) : EMPTY,
+      getPosition: (d) => [d.x, d.y],
+      getRadius: DOT_R,
+      radiusUnits: "common",
+      stroked: true,
+      getFillColor: symbol?.fill ?? WHITE,
+      getLineColor: symbol?.edge ?? WHITE,
+      getLineWidth: 0.5,
+      lineWidthUnits: "common",
+      ...FLAT,
+    }),
     new PathLayer({
       id: "inset-selected-casing",
       data: selEdge.inset,
@@ -2483,41 +2843,63 @@ const DEVICE_PROPS = {
   webgl: { antialias: true, powerPreference: "high-performance" },
 };
 
-deck = new Deck({
-  canvas: "map-canvas",
-  views: new OrthographicView({ id: "map-view", flipY: true }),
-  controller: false,
-  viewState: viewState(),
-  // Nothing here is 3-D: layers stack in the order they are listed, exactly as
-  // SVG paints them.
-  parameters: { depthWriteEnabled: false, depthCompare: "always" },
-  deviceProps: DEVICE_PROPS,
-  layers: [],
-  onResize: ({ width, height }) => {
-    viewWidth = Math.max(1, width);
-    viewHeight = Math.max(1, height);
+// Every canvas fills the same box, so one resize drives all three decks, the
+// globe and the SVG frames. deck.gl used to own this callback for the map
+// canvas; with the globe drawing on that canvas, the observer has to be ours.
+function onViewResize(width, height) {
+  viewWidth = Math.max(1, width);
+  viewHeight = Math.max(1, height);
+  if (globeMap) globeMap.resize(viewWidth, viewHeight);
+  else {
     deck?.setProps({ viewState: viewState() });
-    // Every canvas fills the same box, so one resize drives all three decks
-    // and the SVG frames.
     hoverDeck?.setProps({ viewState: viewState() });
-    insetDeck?.setProps({ viewState: insetViewState() });
-    placeInsetUi();
-  },
-});
+  }
+  insetDeck?.setProps({ viewState: insetViewState() });
+  placeInsetUi();
+  globeMap?.requestDraw();
+}
+
+if (!globeMap) {
+  deck = new Deck({
+    canvas: "map-canvas",
+    views: new OrthographicView({ id: "map-view", flipY: true }),
+    controller: false,
+    viewState: viewState(),
+    // Nothing here is 3-D: layers stack in the order they are listed, exactly
+    // as SVG paints them.
+    parameters: { depthWriteEnabled: false, depthCompare: "always" },
+    deviceProps: DEVICE_PROPS,
+    layers: [],
+    onResize: ({ width, height }) => onViewResize(width, height),
+  });
+}
 
 // The hover deck, on a canvas between the map and the insets. Its camera has
 // to track the map's exactly, because it draws map content: unlike the inset
 // deck below â whose camera is pinned and never moves â every pan and zoom
 // has to push a new viewState here as well.
-hoverDeck = new Deck({
-  canvas: "hover-canvas",
-  views: new OrthographicView({ id: "hover-view", flipY: true }),
-  controller: false,
-  viewState: viewState(),
-  parameters: { depthWriteEnabled: false, depthCompare: "always" },
-  deviceProps: DEVICE_PROPS,
-  layers: [],
-});
+// The globe needs neither this canvas nor this deck. Its scene lives in a
+// texture, so a hover frame copies that texture and draws one county over it —
+// the same arrangement inside ONE context, which it has to be, because a second
+// context could not share the 28 MB of buffers.
+if (!globeMap) {
+  hoverDeck = new Deck({
+    canvas: "hover-canvas",
+    views: new OrthographicView({ id: "hover-view", flipY: true }),
+    controller: false,
+    viewState: viewState(),
+    parameters: { depthWriteEnabled: false, depthCompare: "always" },
+    deviceProps: DEVICE_PROPS,
+    layers: [],
+  });
+} else {
+  // display, not `hidden`: the stylesheet gives this canvas display: block.
+  document.getElementById("hover-canvas").style.display = "none";
+  new ResizeObserver(([e]) => onViewResize(e.contentRect.width, e.contentRect.height)).observe(
+    mapWrap
+  );
+  onViewResize(mapWrap.clientWidth, mapWrap.clientHeight);
+}
 
 // The third deck: the Alaska/Hawaii insets, on their own canvas above the
 // map. Fixed-camera HUD elements can't share the map's deck — deck fits a
@@ -2560,17 +2942,23 @@ let MIN_ZOOM = minZoomFor();
 // coincides with a gesture — the zoom filter blocks drag-pan in paint mode
 // and wheel while a button is down — so pausing here can't block a brush.
 let gesturing = false;
+// The zoom that would frame the whole sphere, with a little air around it. The
+// camera never goes there on its own — it is only the zoom's lower bound, so
+// the view CAN be pulled back that far. The land-fit floor (MIN_ZOOM) is far
+// tighter, so the sphere fit is what actually bounds the wheel.
+const GLOBE_FIT_K = (Math.min(975, 610) * 0.92) / (2 * GLOBE_SCALE);
+const applyScaleExtent = () =>
+  zoom.scaleExtent([Math.min(MIN_ZOOM, GLOBE_FIT_K), 16]);
 const zoom = d3
   .zoom()
-  .scaleExtent([MIN_ZOOM, 16])
+  .scaleExtent([Math.min(MIN_ZOOM, GLOBE_FIT_K), 16])
   .extent([[0, 0], [975, 610]])
   .filter((ev) => {
     if (ev.type === "wheel") return !ev.button;
-    // No drag-pan while a drag means something else: painting states, or a
-    // carve stroke. Wheel zoom stays live in both.
-    // No drag-pan while a drag means something else: painting states, a
-    // carve stroke, or turning the globe. Wheel zoom stays live in all three.
-    return !paintMode && !carveMode && !globeMode && !ev.button;
+    // No drag-pan, ever: a drag always means something else — painting
+    // states, a carve stroke, or turning the globe. d3.zoom owns the wheel
+    // and the programmatic transforms only.
+    return false;
   })
   .on("start.hover", () => {
     gesturing = true;
@@ -2584,10 +2972,16 @@ const zoom = d3
   })
   .on("zoom", (ev) => {
     transform = ev.transform;
-    const view = viewState();
-    deck.setProps({ viewState: view });
-    hoverDeck.setProps({ viewState: view });
+    if (globeMap) {
+      globeMap.setTransform(transform);
+      globeMap.requestDraw();
+    } else {
+      const view = viewState();
+      deck.setProps({ viewState: view });
+      hoverDeck.setProps({ viewState: view });
+    }
     labelGroup.attr("transform", transform);
+    markGroup.attr("transform", transform);
     stateLabelGroup.attr("transform", transform);
     knifeGroup.attr("transform", transform);
     // The tooltip is pinned in screen space, so the map sliding under it
@@ -2616,6 +3010,27 @@ window.__setTransform = (k, x, y) => svg.call(zoom.transform, d3.zoomIdentity.tr
 // were cut from rather than being lost.
 function setRotation(rot) {
   viewRotation = [rot[0], Math.max(-90, Math.min(90, rot[1]))];
+  // On the globe a turn is a uniform write, so this runs per frame of a drag
+  // rather than once at the end of one. Everything a re-bake used to produce is
+  // either unchanged (the geometry, which lives on the sphere) or is one of the
+  // two things below: the extent of the land in view, and the county centroids
+  // the data view places its symbols and values from.
+  if (globeMap) {
+    globeMap.setRotation(viewRotation);
+    computeMapBounds();
+    computeCountyGeo();
+    MIN_ZOOM = minZoomFor();
+    applyScaleExtent();
+    // Not scheduleRefresh: nothing in the model moved, so the sidebar, the
+    // stats and the label LAYOUT all stand. Only the placements that read a
+    // projection have to be redone, and only in the view that shows them.
+    if (inDataView()) {
+      mapVersion++;
+      renderDataLabels();
+    }
+    globeMap.requestDraw();
+    return;
+  }
   PROJ.main = mainProjection(viewRotation);
   tracers.main = makeTracer(PROJ.main);
   assembleBake(bakeMain());
@@ -2645,15 +3060,153 @@ let spinFrom = null; // { x, y, rot } while a spin drag is live
 // on release.
 let spinMoved = false;
 
-// The frames of a spin: the sphere, the coarse land silhouette, and the
-// graticule — the only three things cheap enough to re-project per frame.
-// Fills, borders, labels and the insets all sit out the drag and come back
-// with the settle, which is what keeps the turn responsive.
+// ------------------------------------------------------- the spin preview
+//
+// A spin has to redraw the map every frame, and a full bake is ~130 ms — fine
+// for the one settle at the end of a drag, hopeless at 60 fps. The cost is
+// dominated by per-geometry stream overhead across thousands of counties and
+// arcs, so thinning the whole map does not help. What the preview draws
+// instead is one merged, thinned outline per state: ~130 geometries and ~12k
+// points, about 4 ms to re-project. So the map keeps its own colors while it
+// turns, and only the detail — county lines, border bands, lakes, the state
+// names — waits for the settle.
+
+const SPIN_STEP = 8; // keep one vertex in eight
+const SPIN_MIN_DEG = 0.25; // and drop rings smaller than this across
+
+// How far a ring reaches, in degrees, along its wider axis.
+function ringSpan(ring) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const [x, y] of ring) {
+    if (x < x0) x0 = x;
+    if (x > x1) x1 = x;
+    if (y < y0) y0 = y;
+    if (y > y1) y1 = y;
+  }
+  return Math.max(x1 - x0, y1 - y0);
+}
+
+// A ring's winding is what tells d3 which side of it is inside, and a stride
+// through a wiggly sliver can hand back a ring that turns the other way —
+// three of Belize's cays, a Nunavut islet and one Hudson Bay pond do exactly
+// that. Such a ring no longer reads as a small island but as a polygon
+// covering the rest of the world, and clipping that to the hemisphere emits
+// the horizon circle, which the preview then fills: the whole globe floods
+// with one color the moment a drag starts. So a thinned ring is kept only
+// while it still turns the way the original did. Spherical area over a
+// hemisphere is that test, and it reads holes correctly too — a hole covers
+// "everything but", before and after.
+function turnsTheSameWay(a, b) {
+  const inverted = (ring) => d3.geoArea({ type: "Polygon", coordinates: [ring] }) > 2 * Math.PI;
+  return inverted(a) === inverted(b);
+}
+
+function thinRing(ring) {
+  if (ring.length <= SPIN_STEP + 2) return ring;
+  const out = [];
+  for (let i = 0; i < ring.length; i += SPIN_STEP) out.push(ring[i]);
+  if (out[out.length - 1] !== ring[ring.length - 1]) out.push(ring[ring.length - 1]);
+  return out.length >= 4 && turnsTheSameWay(out, ring) ? out : ring;
+}
+
+// Two cuts, and the second is the one that pays. Thinning alone barely helps:
+// most of a merged outline's rings are already short — every lake islet and
+// offshore rock the source draws — so a stride hits its don't-collapse floor
+// on thousands of them and the point count hardly moves. Dropping those rings
+// outright is what makes the preview cheap, and a speck a quarter degree
+// across is invisible at any zoom a spin happens at.
+function coarsen(geometry) {
+  const polys = geometry.type === "Polygon" ? [geometry.coordinates] : geometry.coordinates;
+  // The outer ring decides whether the polygon appears at all; holes are
+  // judged on their own, so a big lake stays a hole and a pond does not.
+  const coarsePoly = (rings) =>
+    [rings[0], ...rings.slice(1).filter((r) => ringSpan(r) >= SPIN_MIN_DEG)].map(thinRing);
+  const kept = [];
+  for (const rings of polys) {
+    if (ringSpan(rings[0]) >= SPIN_MIN_DEG) kept.push(coarsePoly(rings));
+  }
+  // A state the filter would drop whole — DC, a small island country — still
+  // has to draw: one enclosed by its neighbors would otherwise leave a hole
+  // in the land where it belongs. Its widest polygon is kept at any size.
+  if (!kept.length && polys.length) {
+    kept.push(coarsePoly(polys.reduce((a, b) => (ringSpan(b[0]) > ringSpan(a[0]) ? b : a))));
+  }
+  return { type: "MultiPolygon", coordinates: kept };
+}
+
+// The scenery land, coarsened once. Nothing it holds can change hands, so
+// unlike the states it is built on first use and then kept for good.
+let spinWorld = null;
+const spinWorldGeometry = () =>
+  (spinWorld ??= worldLand.map((f) => coarsen(f.geometry)).filter((g) => g.coordinates.length));
+
+// The preview's outlines, one per state, merged straight off the topology so
+// that neighbors share their border exactly and the coarse shapes still tile
+// without slivers — which is why the preview needs no white backing under it.
+// Merging and thinning ~3500 units costs ~50 ms, so the result is cached
+// until territory changes hands. Colors are not baked in here: a recolor
+// moves no border, so the two are read separately.
+let spinShapes = EMPTY;
+let spinShapesFor = -1;
+function spinGeometry() {
+  if (spinShapesFor === assignVersion) return spinShapes;
+  const groups = new Map();
+  for (const g of topo.objects.counties.geometries) {
+    // A carve divides a county between states, and merging cannot cut an arc,
+    // so the preview gives a carved county whole to the state that holds its
+    // biggest piece — coarse, like everything else it draws.
+    const sid = assign.get(splits.get(g.id)?.backingId ?? g.id);
+    if (!sid) continue;
+    if (!groups.has(sid)) groups.set(sid, []);
+    groups.get(sid).push(g);
+  }
+  spinShapes = [...groups].map(([sid, gs]) => ({ sid, geometry: coarsen(merge(topo, gs)) }));
+  spinShapesFor = assignVersion;
+  return spinShapes;
+}
+
+// What color each state wears in the preview, on the same rules the full map
+// follows — minus the paint-mode dim, since the press that starts a spin is
+// filtered out while painting. Read once when the drag begins: nothing can
+// repaint the map mid-spin.
+let spinFill = new Map();
+function spinColors() {
+  const dataView = inDataView();
+  const statKey = rankStatSel.value;
+  const choro = dataView && !SYMBOL_STATS[statKey] ? choroplethFills(statKey) : null;
+  const out = new Map();
+  for (const [sid, info] of stateInfo) {
+    out.set(
+      sid,
+      !dataView
+        ? rgba(sid === selected ? highlight(info.color) : info.color)
+        : info.foreign
+          ? FOREIGN_LAND
+          : choro
+            ? (choro.get(sid) ?? NO_DATA)
+            : GREY_LAND
+    );
+  }
+  return out;
+}
+
+// The frames of a spin: the sphere, the graticule, and the coarse state
+// outlines in the colors the map is wearing.
 function spinLayers() {
-  const proj = mainProjection(viewRotation);
-  const trace = makeTracer(proj);
-  const rings = [];
-  for (const ring of trace(SPIN_LAND)) if (ring.length >= 3) rings.push(ring);
+  // The preview projects through a tracer of its own. PROJ.main and
+  // tracers.main still hold the facing the last settle baked, and hover,
+  // picking, carving and the labels all read that — they come back only when
+  // the settle re-bakes them at the facing the drag ended on.
+  tracers.spin = makeTracer(mainProjection(viewRotation));
+  const parts = [];
+  // Scenery first, so the map's own states draw over it exactly as they do in
+  // the full stack.
+  for (const geometry of spinWorldGeometry()) {
+    parts.push(...projectParts(geometry, { color: WORLD_LAND }, "spin"));
+  }
+  for (const { sid, geometry } of spinGeometry()) {
+    parts.push(...projectParts(geometry, { color: spinFill.get(sid) ?? GREY_LAND }, "spin"));
+  }
   return [
     new SolidPolygonLayer({
       id: "spin-sphere",
@@ -2664,7 +3217,7 @@ function spinLayers() {
     }),
     new PathLayer({
       id: "spin-graticule",
-      data: trace(GRATICULE).map((path) => ({ path })),
+      data: projectLines(GRATICULE, "spin").map((path) => ({ path })),
       getPath: (d) => d.path,
       getColor: GRATICULE_LINE,
       getWidth: 0.7,
@@ -2673,40 +3226,66 @@ function spinLayers() {
     }),
     new SolidPolygonLayer({
       id: "spin-land",
-      data: rings.map((r) => ({ rings: [r] })),
+      data: parts,
       getPolygon: (d) => d.rings,
-      getFillColor: GREY_LAND,
+      getFillColor: (d) => d.color,
       ...FLAT,
     }),
   ];
 }
 
-function spinTo(rot) {
-  viewRotation = [rot[0], Math.max(-90, Math.min(90, rot[1]))];
-  deck.setProps({ layers: spinLayers() });
-  // The hover tint is drawn in map coordinates against the old facing, so it
-  // would sit over open ocean the moment the globe moves.
+// The drag has travelled far enough to count: swap the map for the preview.
+// Everything the preview leaves out has to go with it — the hover tint and
+// the state names are placed against the facing of the last bake, so they
+// would sit over the wrong ground the moment the globe moves. The labels hide
+// through a class on the SVG rather than their own display attribute, which
+// the labeler owns and rewrites on every refresh.
+function beginSpin() {
+  spinMoved = true;
+  // The whole preview apparatus exists because a full bake is ~130 ms. On the
+  // globe a turn is a mat3 uniform, so there is nothing to preview and nothing
+  // to settle — the real map turns under the cursor, county lines, labels and
+  // all. This is the change the rewrite was for.
+  if (globeMap) return;
+  spinFill = spinColors();
   hoverDeck.setProps({ layers: [] });
+  svg.classed("spinning", true);
 }
 
-// The zoom that frames whatever land the current facing shows, for coming
-// back to the atlas view somewhere other than home. At the home rotation the
-// atlas view is the design box itself, so that case returns the identity
-// transform the map has always used rather than a recomputed near-miss.
-function landFitTransform() {
-  if (viewRotation[0] === HOME_ROTATION[0] && viewRotation[1] === HOME_ROTATION[1]) {
-    return HOME_TRANSFORM;
+let spinFrame = 0;
+function spinTo(rot) {
+  if (globeMap) {
+    setRotation(rot);
+    return;
   }
-  const w = MAP_BOUNDS.x1 - MAP_BOUNDS.x0;
-  const h = MAP_BOUNDS.y1 - MAP_BOUNDS.y0;
-  if (!(w > 0 && h > 0)) return HOME_TRANSFORM;
-  const k = Math.max(MIN_ZOOM, Math.min(975 / w, 610 / h, 16));
-  return d3.zoomIdentity
-    .translate(
-      975 / 2 - (k * (MAP_BOUNDS.x0 + MAP_BOUNDS.x1)) / 2,
-      610 / 2 - (k * (MAP_BOUNDS.y0 + MAP_BOUNDS.y1)) / 2
-    )
-    .scale(k);
+  viewRotation = [rot[0], Math.max(-90, Math.min(90, rot[1]))];
+  // Pointer events outrun the display — a high-rate mouse fires several per
+  // frame — so the retrace waits for the frame that will actually show it.
+  if (!spinFrame) spinFrame = requestAnimationFrame(drawSpin);
+}
+function drawSpin() {
+  spinFrame = 0;
+  deck.setProps({ layers: spinLayers() });
+}
+
+// The end of the gesture: the coarse preview gives way to a full bake at the
+// facing the drag ended on. The settle is the expensive step, and it happens
+// once per gesture rather than once per frame. The preview class comes off
+// before the bake rather than after, because the bake and the refresh it
+// schedules both finish before the browser paints again — so the labels return
+// in the same frame as the baked map instead of flashing at their old places
+// for one.
+function settleSpin() {
+  spinFrom = null;
+  // A press that never moved leaves the facing alone, so it costs no bake and
+  // still reads as a plain click on whatever is under it.
+  if (!spinMoved) return;
+  // Nothing to settle: every frame of the drag was already the real map.
+  if (globeMap) return;
+  if (spinFrame) cancelAnimationFrame(spinFrame);
+  spinFrame = 0;
+  svg.classed("spinning", false);
+  setRotation(viewRotation);
 }
 
 // ------------------------------------------------------------- inset boxes
@@ -2729,6 +3308,7 @@ function placeInsetUi() {
   const place = `scale(${1 / fit}) translate(${ax} ${ay})`;
   insetGroup.attr("transform", place);
   insetLabelGroup.attr("transform", place);
+  insetDataLabelGroup.attr("transform", place);
   insetMaskHoles.attr("transform", place);
   clipInsetCanvas();
 }
@@ -2786,37 +3366,10 @@ for (const key of ["ak", "hi"]) {
   });
 }
 
-// ------------------------------------------------------------- globe mode
-
-// The zoom that frames the whole sphere, with a little air around it. The
-// atlas view's lower bound is "fit the land", which is far tighter than
-// "fit the globe", so globe mode lowers the floor to let the view out.
-const GLOBE_FIT_K = (Math.min(975, 610) * 0.92) / (2 * GLOBE_SCALE);
-const globeHomeTransform = () =>
-  d3.zoomIdentity
-    .translate(975 / 2 - GLOBE_FIT_K * GLOBE_TRANSLATE[0], 610 / 2 - GLOBE_FIT_K * GLOBE_TRANSLATE[1])
-    .scale(GLOBE_FIT_K);
-const applyScaleExtent = () =>
-  zoom.scaleExtent([globeMode ? Math.min(MIN_ZOOM, GLOBE_FIT_K) : MIN_ZOOM, 16]);
-
-function setGlobeMode(on) {
-  globeMode = on;
-  // document.getElementById, not the el() helper: this section runs during
-  // module init, and el is declared further down the file.
-  const btn = document.getElementById("globe");
-  btn.classList.toggle("active", on);
-  btn.setAttribute("aria-pressed", String(on));
-  btn.title = on
-    ? "Back to the atlas view"
-    : "Turn the globe: drag the map to face another part of the world";
-  applyScaleExtent();
-  // Leaving globe mode lands on the land the globe was turned to, not on the
-  // lower 48 — otherwise turning to another continent and stepping out would
-  // drop the view on empty ocean.
-  svg.call(zoom.transform, on ? globeHomeTransform() : landFitTransform());
-  scheduleRefresh();
-}
-document.getElementById("globe").addEventListener("click", () => setGlobeMode(!globeMode));
+// Merging the spin preview's outlines costs ~50 ms; paying it at startup
+// keeps it out of the first frame of the first drag, which is where it would
+// show as a stutter. The globe renderer has no preview to build.
+if (!globeMap) (spinGeometry(), spinWorldGeometry());
 
 // Which open inset box, if any, the given CSS-pixel point falls in — the
 // inverse of the inset camera, which at zoom 0 is just a shift.
@@ -2840,10 +3393,13 @@ function pickCounty(ev) {
   const rect = mapWrap.getBoundingClientRect();
   const x = ev.clientX - rect.left;
   const y = ev.clientY - rect.top;
-  const info = insetBoxAt(x, y)
-    ? insetDeck.pickObject({ x, y, layerIds: ["inset-counties"] })
-    : deck.pickObject({ x, y, layerIds: ["counties"] });
-  return info?.object?.fips ?? null;
+  if (insetBoxAt(x, y))
+    return insetDeck.pickObject({ x, y, layerIds: ["inset-counties"] })?.object?.fips ?? null;
+  // Outside a box the globe answers analytically: invert the camera to a
+  // lon/lat, then ask a grid over the source rings. Half a microsecond, no
+  // readback, and so no reason to stop picking during a gesture.
+  if (globeMap) return globeMap.pickAt(x, y);
+  return deck.pickObject({ x, y, layerIds: ["counties"] })?.object?.fips ?? null;
 }
 
 // A pointer event in map (design-space) coordinates: through the SVG's
@@ -2886,6 +3442,7 @@ function scheduleHover() {
 // instances by identity and skips them outright, which makes the splice
 // cheaper than a rebuild, not just equivalent.
 let hoverApplied = null;
+let hoverUnitsApplied = "";
 let insetLayerList = EMPTY;
 
 // The cheap path for pure hover frames: the pointer moved, nothing else did.
@@ -2893,12 +3450,24 @@ let insetLayerList = EMPTY;
 // mouse move is real CPU work for no change — only the two hover layers can
 // differ here.
 function refreshHoverOnly() {
+  // The globe's half of this is its own comparison, on its own inputs: a set of
+  // units rather than a set of projected parts. Everything else here is the
+  // inset deck, which still wants the parts.
+  if (globeMap) {
+    const key = `${hoverFips}:${inDataView()}:${assignVersion}`;
+    if (key !== hoverUnitsApplied) {
+      hoverUnitsApplied = key;
+      globeMap.setHover(hoverUnits());
+      globeMap.requestDraw();
+    }
+  }
   const split = hoverSplit();
   if (split === hoverApplied) return;
   const prev = hoverApplied;
   hoverApplied = split;
-  if (!prev || split.main !== prev.main)
+  if (!globeMap && (!prev || split.main !== prev.main)) {
     hoverDeck.setProps({ layers: [countyHoverLayer(split.main)] });
+  }
   if (!prev || split.inset !== prev.inset) {
     insetLayerList = insetLayerList.map((l) =>
       l.id === "inset-hover" ? insetHoverLayer(split.inset) : l
@@ -2924,8 +3493,14 @@ function doRefresh() {
   const layers = buildLayers();
   hoverApplied = hoverSplit();
   insetLayerList = layers.inset;
-  deck.setProps({ layers: layers.map });
-  hoverDeck.setProps({ layers: layers.hover });
+  if (globeMap) {
+    paintGlobe();
+    hoverUnitsApplied = `${hoverFips}:${inDataView()}:${assignVersion}`;
+    globeMap.setHover(hoverUnits());
+  } else {
+    deck.setProps({ layers: layers.map });
+    hoverDeck.setProps({ layers: layers.hover });
+  }
   insetDeck.setProps({ layers: layers.inset });
   renderDataLabels();
   stateLabeler.update({ assignVersion, labelsVersion, visible: !inDataView(), assign, stateInfo });
@@ -2970,10 +3545,9 @@ function applyBrush(fips) {
 }
 
 svg.on("pointerdown", (ev) => {
-  // Globe mode: a left press grabs the sphere. d3.zoom's own drag-pan is
-  // filtered out while globeMode is on, so the two can't fight over the
-  // gesture; the wheel still zooms.
-  if (globeMode && !paintMode && !carveMode && ev.button === 0) {
+  // A left press grabs the sphere. d3.zoom's own drag-pan is filtered out
+  // entirely, so the two can't fight over the gesture; the wheel still zooms.
+  if (!paintMode && !carveMode && ev.button === 0) {
     const [x, y] = pointerWorld(ev);
     spinFrom = { x, y, rot: [...viewRotation] };
     spinMoved = false;
@@ -3022,14 +3596,9 @@ svg.on("pointerdown", (ev) => {
   applyBrush(fips);
 });
 window.addEventListener("pointerup", () => {
-  // A spin settles on release: the coarse preview is replaced by a full bake
-  // at the facing the drag ended on. The settle is the expensive step, and it
-  // happens once per gesture rather than once per frame.
+  // A spin settles on release (see settleSpin).
   if (spinFrom) {
-    spinFrom = null;
-    // A press that never moved leaves the facing alone, so it costs no bake
-    // and still reads as a plain click on whatever is under it.
-    if (spinMoved) setRotation(viewRotation);
+    settleSpin();
     return;
   }
   // A knife stroke settles on release: a drag cuts, a stationary click
@@ -3128,7 +3697,11 @@ let lastPointerEvent = null;
 
 function processPointerMove() {
   const ev = lastPointerEvent;
-  if (!ev || gesturing) return;
+  // The gesture pause exists because a deck pick renders the county layer into
+  // a picking buffer and reads it back — a CPU-GPU stall injected exactly when
+  // frames are most expensive. The globe's pick is arithmetic, so it keeps up
+  // through a pan or a wheel and the tint no longer freezes mid-gesture.
+  if (!ev || (gesturing && !globeMap)) return;
   // The armed carve knife feeds on the pointer while a stroke is down;
   // otherwise carving leaves the ordinary county hover and tooltip alone —
   // they help aim the cut.
@@ -3199,6 +3772,7 @@ function processPointerMove() {
     const c = data.counties[fips];
     const margin = c.tot ? " · " + fmtMargin((100 * (c.dem - c.gop)) / c.tot) : "";
     const income = c.mhi ? `<br>${fmtMoney(c.mhi)} median income` : "";
+    const lifeExp = c.life ? `<br>${fmtYears(c.life)} life expectancy` : "";
     // A foreign unit standing alone is its own state; skip the redundant
     // "Alberta · Alberta".
     const sName = stateInfo.get(assign.get(fips)).name;
@@ -3207,7 +3781,7 @@ function processPointerMove() {
     // education and income, but GDP and the 2024 vote only exist per county
     // and divide by population share — say so wherever the numbers show.
     const est = c.est ? `<br><span class="tip-note">Piece of a carved county · GDP &amp; 2024 vote estimated</span>` : "";
-    tooltip.innerHTML = `${title}<br>${fmtPop(c.pop)} people${margin}${income}${est}`;
+    tooltip.innerHTML = `${title}<br>${fmtPop(c.pop)} people${margin}${income}${lifeExp}${est}`;
   }
   placeTooltip(ev);
 }
@@ -3218,14 +3792,28 @@ svg.on("pointermove", (ev) => {
   // cursor. Dragging right brings lower longitudes to the middle, and
   // dragging down brings higher latitudes, which is why the two signs differ.
   if (spinFrom) {
+    // The release happened outside the window, so no pointerup came: settle
+    // here instead, or the map would sit in its preview — no county lines, no
+    // labels — until the next press.
+    if (!(ev.buttons & 1)) {
+      settleSpin();
+      // No click follows a release the window never saw, so the guard that
+      // swallows the click at the end of a spin is cleared here instead.
+      spinMoved = false;
+      return;
+    }
     const [x, y] = pointerWorld(ev);
     const dx = x - spinFrom.x;
     const dy = y - spinFrom.y;
-    if (Math.hypot(dx, dy) > 0.5) spinMoved = true;
-    spinTo([
-      spinFrom.rot[0] + dx * DEG_PER_UNIT,
-      spinFrom.rot[1] - dy * DEG_PER_UNIT,
-    ]);
+    // Until the press has travelled, it is still a plain click on whatever is
+    // under it — so the preview never flashes up for one.
+    if (!spinMoved && Math.hypot(dx, dy) > 0.5) beginSpin();
+    if (spinMoved) {
+      spinTo([
+        spinFrom.rot[0] + dx * DEG_PER_UNIT,
+        spinFrom.rot[1] - dy * DEG_PER_UNIT,
+      ]);
+    }
     return;
   }
   lastPointerEvent = ev;
@@ -3333,7 +3921,7 @@ function renderSidebar() {
   if (selected) {
     const info = stateInfo.get(selected);
     const s = stats.get(selected) ?? {
-      pop: 0, gdp: 0, gdppc: 0, bach: 0, mhi: 0, incPop: 0, tot: 0,
+      pop: 0, gdp: 0, gdppc: 0, bach: 0, mhi: 0, incPop: 0, life: 0, lifePop: 0, tot: 0,
       rT: 0, rW: 0, rB: 0, rN: 0, rA: 0, rH: 0, n: 0,
     };
     const dot = el("state-dot");
@@ -3346,20 +3934,21 @@ function renderSidebar() {
     el("add-state").hidden = !info.foreign;
     el("v-pop").textContent = fmtPop(s.pop);
     el("v-gdp").textContent = fmtBigMoney(s.gdp);
-    el("v-gdppc").textContent = fmtMoney(s.gdppc);
+    el("v-gdppc").textContent = fmtMoneyK(s.gdppc);
     el("v-mhi").textContent = s.incPop ? fmtMoney(s.mhi) : "—";
     el("v-bach").textContent = fmtPct(s.bach);
+    el("v-life").textContent = s.lifePop ? fmtYears(s.life) : "—";
     el("v-margin").textContent = s.tot ? fmtMargin(s.margin) : "—";
     el("v-seats").textContent = s.seats || "—";
     el("v-ev").textContent = s.ev || "—";
     el("v-n").textContent = s.n;
-    for (const key of ["pop", "gdp", "gdppc", "mhi", "bach", "margin", "ev"]) {
+    for (const key of ["pop", "gdp", "gdppc", "mhi", "bach", "life", "margin", "ev"]) {
       const i = ranks[key].indexOf(selected);
       el("r-" + key).textContent = i === -1 ? "—" : `#${i + 1} of ${ranks[key].length}`;
     }
     // Bars are scaled against the current leader, like the rankings list;
     // a state missing a stat's inputs shows an empty track.
-    for (const key of ["pop", "gdp", "gdppc", "mhi", "bach"]) {
+    for (const key of ["pop", "gdp", "gdppc", "mhi", "bach", "life"]) {
       const def = STAT_DEFS[key];
       const top = ranks[key][0];
       const ok = top && s.n > 0 && (!def.has || def.has(s));
@@ -3643,7 +4232,7 @@ el("reset-view").addEventListener("click", () => {
   if (viewRotation[0] !== HOME_ROTATION[0] || viewRotation[1] !== HOME_ROTATION[1]) {
     setRotation(HOME_ROTATION);
   }
-  svg.call(zoom.transform, globeMode ? globeHomeTransform() : HOME_TRANSFORM);
+  svg.call(zoom.transform, HOME_TRANSFORM);
 });
 
 // ----------------------------------------------------------------- presets
@@ -3720,7 +4309,18 @@ async function applyPreset(preset) {
   const sid = mergeTarget(preset) ?? createState(preset.name);
   for (const fips of fipsList) for (const id of liveUnitIds(fips)) assign.set(id, sid);
 
-  if (partials.length) {
+  // A preset's partial counties are carved along the tract ids it names, and
+  // carving is the one thing on the map the globe renderer does not do yet:
+  // C6's model builds the pieces, and nothing joins it to the split registry
+  // this path writes into. They are left unclaimed rather than claimed whole,
+  // so the preset means less than it should but never the wrong thing.
+  if (partials.length && globeMap) {
+    mapNote(
+      `${listNames(partials.map((p) => data.counties[p.fips]?.name ?? p.fips))} ` +
+        `${partials.length === 1 ? "is" : "are"} claimed in part by this preset, ` +
+        `and carving is not wired to the globe yet — left whole and unclaimed.`
+    );
+  } else if (partials.length) {
     carving = true;
     try {
       const missing = [];
@@ -3799,6 +4399,13 @@ function mapNote(text) {
 }
 
 function setCarveMode(on) {
+  // See the note in applyPreset: the globe has C6's carve model and no wiring
+  // from it to the app's split registry, so the knife is held back rather than
+  // left to cut a map that would not show the result.
+  if (on && globeMap) {
+    mapNote("Carving is not wired to the globe renderer yet — open ?deck to use it.");
+    return;
+  }
   if (carveMode === !!on) return;
   carveMode = !!on;
   if (carveMode && paintMode) setPaintMode(false);
@@ -4298,7 +4905,12 @@ async function importGeoJSON(file) {
 }
 
 const geojsonInput = el("geojson-file");
-el("from-geojson").addEventListener("click", () => geojsonInput.click());
+el("from-geojson").addEventListener("click", () => {
+  // Same reason as the knife: this claims whole counties and CARVES the ones
+  // the boundary crosses.
+  if (globeMap) return mapNote("Importing a boundary carves counties, which is not wired to the globe renderer yet — open ?deck to use it.");
+  geojsonInput.click();
+});
 geojsonInput.addEventListener("change", () => {
   const file = geojsonInput.files?.[0];
   geojsonInput.value = ""; // so the same file can be imported again
@@ -4362,10 +4974,11 @@ function renderLegend() {
     }</div>`;
   } else {
     const vals = statEntries(def).map(([, s]) => def.get(s));
+    const trimmed = trimOutliers(vals);
     const diverge = def.bar === "diverge";
-    const m = Math.max(1e-9, ...vals.map(Math.abs));
-    const lo = diverge ? -m : Math.min(...vals);
-    const hi = diverge ? m : Math.max(...vals);
+    const m = Math.max(1e-9, ...trimmed.map(Math.abs));
+    const lo = diverge ? -m : Math.min(...trimmed);
+    const hi = diverge ? m : Math.max(...trimmed);
     const ramp = diverge ? divColor : seqColor;
     const stops = d3
       .range(8)
@@ -4391,6 +5004,7 @@ function renderSources() {
     gdppc: [`GDP: BEA ${m.gdpYear}`, `Population: Census ${m.popYear}`],
     mhi: [`Income: SAIPE ${m.incomeYear}`],
     bach: [`Education: ACS ${m.eduWindow} (adults 25+)`],
+    life: [`Life expectancy: County Health Rankings & Roadmaps (NCHS), ${m.lifeExpWindow}`],
     // The margin view carries the election replay, whose apportionment also
     // leans on population.
     margin: [
@@ -4405,7 +5019,7 @@ function renderSources() {
     ],
   };
   const list = SOURCES_FOR[rankStatSel.value] ?? [`Race/ethnicity: Census ${m.raceYear}`];
-  list.push("Non-US pop & GDP: 2023–24 estimates");
+  list.push("Non-US pop, GDP, education & income: hand-compiled estimates");
   el("sources").textContent = [...list, "Shorelines & lakes: Natural Earth"].join(" · ");
 }
 

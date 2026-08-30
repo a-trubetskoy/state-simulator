@@ -9,13 +9,21 @@
     "build": "vite build",
     "preview": "vite preview",
     "data": "node --max-old-space-size=8192 scripts/build-data.mjs",
-    "data:tracts": "node --max-old-space-size=8192 scripts/build-tracts.mjs"
+    "data:tracts": "node --max-old-space-size=8192 scripts/build-tracts.mjs",
+    "data:world": "node --max-old-space-size=8192 scripts/build-world.mjs",
+    "spike:data": "node --max-old-space-size=8192 spike/build-geometry.mjs",
+    "data:geometry": "node --max-old-space-size=8192 scripts/build-geometry.mjs",
+    "check:pick": "node scripts/pick-check.mjs",
+    "check:labels": "node --max-old-space-size=8192 scripts/label-check.mjs",
+    "check:carve": "node --max-old-space-size=8192 scripts/carve-check.mjs",
+    "check:layers": "node scripts/layer-check.mjs"
   },
   "dependencies": {
     "@deck.gl/core": "^9.3.10",
     "@deck.gl/extensions": "^9.3.10",
     "@deck.gl/layers": "^9.3.10",
     "d3": "^7.9.0",
+    "earcut": "^2.2.4",
     "topojson-client": "^3.1.0"
   },
   "devDependencies": {

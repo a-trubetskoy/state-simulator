@@ -1,9 +1,10 @@
-// Population and GDP for the non-US units of the North America map.
+// Population, GDP, education, and income for the non-US units of the North
+// America map.
 //
 // Unlike the US county data, these are a static, hand-compiled table rather
-// than a downloaded dataset: they are ~80 numbers total, the sources are
-// scattered across three national statistics agencies plus the World Bank,
-// and the app only needs population and nominal GDP for them.
+// than a downloaded dataset: the sources are scattered across national
+// statistics agencies, the World Bank, and UNESCO, and none of it changes
+// often enough to be worth a live pipeline.
 //
 // The Canadian rows are no longer map units — the map draws Canada as census
 // divisions — and only their `gdp` is still read, as the provincial control
@@ -12,6 +13,10 @@
 // `pop` is unused: Statistics Canada publishes population per census division,
 // so the build takes the real thing and a province is simply the sum of its
 // divisions. The numbers are kept here as the published cross-check they were.
+// Canadian divisions get their own real education and income figures from the
+// census profile (see loadCaProfile in build-data.mjs), so no `bachPct`/`mhi`
+// is needed on the Canadian rows below.
+//
 // Values are rounded estimates:
 //
 //   Canada:  Statistics Canada — population estimates Q3 2024; provincial
@@ -28,6 +33,35 @@
 // Keys are the unit ids the geometry build derives from Natural Earth:
 // ISO 3166-2 for Canadian provinces and Mexican states, ISO alpha-3 for
 // Caribbean and Central American countries and territories.
+//
+// `bachPct` is the share of the adult population with a bachelor's degree or
+// higher, and `mhi` is household income in current US dollars — both rough,
+// non-rigorous estimates in the spirit of the rest of this table:
+//
+//   Mexico:  bachPct from INEGI's 2020 census share of the population 15+
+//            whose highest schooling is "superior" (any tertiary), scaled by
+//            a flat 0.7 completion factor (the national ratio of completed
+//            licenciatura+posgrado to any tertiary schooling) to approximate
+//            a finished bachelor's degree — a state-level average, not a
+//            per-state completion rate, so it drifts where a state's mix of
+//            finished-vs-unfinished tertiary schooling differs from the
+//            national one. `mhi` is INEGI's ENIGH 2024 average annual
+//            household income by state, converted at a flat 18 MXN/USD.
+//   Others:  bachPct is a mix of measured census/survey figures (years vary
+//            widely, 2001–2023) and rough estimates for places with no
+//            recent breakdown — see the per-country years below. `mhi` has
+//            no real household-income survey for almost any of these units,
+//            so it is built from World Bank GNI per capita (Atlas method,
+//            mostly 2023–24) times a flat 1.5 — a blunt stand-in for
+//            household pooling net of the usual gap between mean GNI and a
+//            median household figure. Puerto Rico and the US Virgin Islands
+//            use directly known/estimated household income instead of the
+//            GNI formula, since applying it there visibly overshoots (Puerto
+//            Rico in particular has a GNI/personal-income split unusually
+//            wide even for this list, from profit-shifting by mainland
+//            firms). None of this should be read as more precise than it is
+//            — it exists so foreign units aren't stuck at "—" on two of the
+//            app's rankings, not as a citable economic figure.
 
 const B = 1e6; // $1B in thousands of dollars
 
@@ -49,78 +83,78 @@ export const NA_UNIT_STATS = new Map(
     "CA-NU": { pop: 41_000, gdp: 3.6 * B }, // Nunavut
 
     // --- Mexico: states ------------------------------------------------
-    "MX-CMX": { pop: 9_210_000, gdp: 285 * B }, // Ciudad de México
-    "MX-DIF": { pop: 9_210_000, gdp: 285 * B }, // (older ISO code for CDMX)
-    "MX-MEX": { pop: 17_600_000, gdp: 165 * B }, // México (state)
-    "MX-NLE": { pop: 6_100_000, gdp: 150 * B }, // Nuevo León
-    "MX-JAL": { pop: 8_800_000, gdp: 135 * B }, // Jalisco
-    "MX-GUA": { pop: 6_400_000, gdp: 80 * B }, // Guanajuato
-    "MX-VER": { pop: 8_100_000, gdp: 80 * B }, // Veracruz
-    "MX-BCN": { pop: 3_900_000, gdp: 72 * B }, // Baja California
-    "MX-CHH": { pop: 3_900_000, gdp: 70 * B }, // Chihuahua
-    "MX-COA": { pop: 3_400_000, gdp: 70 * B }, // Coahuila
-    "MX-SON": { pop: 3_100_000, gdp: 65 * B }, // Sonora
-    "MX-TAM": { pop: 3_700_000, gdp: 55 * B }, // Tamaulipas
-    "MX-PUE": { pop: 6_800_000, gdp: 55 * B }, // Puebla
-    "MX-QUE": { pop: 2_500_000, gdp: 50 * B }, // Querétaro
-    "MX-SIN": { pop: 3_100_000, gdp: 45 * B }, // Sinaloa
-    "MX-MIC": { pop: 4_900_000, gdp: 45 * B }, // Michoacán
-    "MX-TAB": { pop: 2_500_000, gdp: 43 * B }, // Tabasco
-    "MX-SLP": { pop: 2_900_000, gdp: 42 * B }, // San Luis Potosí
-    "MX-CAM": { pop: 1_000_000, gdp: 38 * B }, // Campeche (oil-heavy)
-    "MX-ROO": { pop: 2_000_000, gdp: 32 * B }, // Quintana Roo
-    "MX-YUC": { pop: 2_400_000, gdp: 30 * B }, // Yucatán
-    "MX-HID": { pop: 3_200_000, gdp: 30 * B }, // Hidalgo
-    "MX-CHP": { pop: 5_800_000, gdp: 28 * B }, // Chiapas
-    "MX-AGU": { pop: 1_500_000, gdp: 28 * B }, // Aguascalientes
-    "MX-OAX": { pop: 4_200_000, gdp: 26 * B }, // Oaxaca
-    "MX-GRO": { pop: 3_600_000, gdp: 24 * B }, // Guerrero
-    "MX-DUR": { pop: 1_900_000, gdp: 22 * B }, // Durango
-    "MX-MOR": { pop: 2_000_000, gdp: 19 * B }, // Morelos
-    "MX-BCS": { pop: 850_000, gdp: 18 * B }, // Baja California Sur
-    "MX-ZAC": { pop: 1_700_000, gdp: 17 * B }, // Zacatecas
-    "MX-NAY": { pop: 1_300_000, gdp: 13 * B }, // Nayarit
-    "MX-COL": { pop: 750_000, gdp: 11 * B }, // Colima
-    "MX-TLA": { pop: 1_400_000, gdp: 10 * B }, // Tlaxcala
+    "MX-CMX": { pop: 9_210_000, gdp: 285 * B, bachPct: 24.2, mhi: 24_600 }, // Ciudad de México
+    "MX-DIF": { pop: 9_210_000, gdp: 285 * B, bachPct: 24.2, mhi: 24_600 }, // (older ISO code for CDMX)
+    "MX-MEX": { pop: 17_600_000, gdp: 165 * B, bachPct: 15.0, mhi: 16_500 }, // México (state)
+    "MX-NLE": { pop: 6_100_000, gdp: 150 * B, bachPct: 18.3, mhi: 26_000 }, // Nuevo León
+    "MX-JAL": { pop: 8_800_000, gdp: 135 * B, bachPct: 15.6, mhi: 19_400 }, // Jalisco
+    "MX-GUA": { pop: 6_400_000, gdp: 80 * B, bachPct: 11.1, mhi: 16_600 }, // Guanajuato
+    "MX-VER": { pop: 8_100_000, gdp: 80 * B, bachPct: 11.9, mhi: 11_800 }, // Veracruz
+    "MX-BCN": { pop: 3_900_000, gdp: 72 * B, bachPct: 15.1, mhi: 22_500 }, // Baja California
+    "MX-CHH": { pop: 3_900_000, gdp: 70 * B, bachPct: 15.2, mhi: 20_500 }, // Chihuahua
+    "MX-COA": { pop: 3_400_000, gdp: 70 * B, bachPct: 16.6, mhi: 19_500 }, // Coahuila
+    "MX-SON": { pop: 3_100_000, gdp: 65 * B, bachPct: 16.8, mhi: 21_000 }, // Sonora
+    "MX-TAM": { pop: 3_700_000, gdp: 55 * B, bachPct: 15.8, mhi: 17_200 }, // Tamaulipas
+    "MX-PUE": { pop: 6_800_000, gdp: 55 * B, bachPct: 13.6, mhi: 13_800 }, // Puebla
+    "MX-QUE": { pop: 2_500_000, gdp: 50 * B, bachPct: 19.3, mhi: 21_700 }, // Querétaro
+    "MX-SIN": { pop: 3_100_000, gdp: 45 * B, bachPct: 18.9, mhi: 18_400 }, // Sinaloa
+    "MX-MIC": { pop: 4_900_000, gdp: 45 * B, bachPct: 11.5, mhi: 15_200 }, // Michoacán
+    "MX-TAB": { pop: 2_500_000, gdp: 43 * B, bachPct: 14.4, mhi: 14_400 }, // Tabasco
+    "MX-SLP": { pop: 2_900_000, gdp: 42 * B, bachPct: 14.4, mhi: 16_300 }, // San Luis Potosí
+    "MX-CAM": { pop: 1_000_000, gdp: 38 * B, bachPct: 15.6, mhi: 14_700 }, // Campeche (oil-heavy)
+    "MX-ROO": { pop: 2_000_000, gdp: 32 * B, bachPct: 15.1, mhi: 19_700 }, // Quintana Roo
+    "MX-YUC": { pop: 2_400_000, gdp: 30 * B, bachPct: 15.5, mhi: 17_800 }, // Yucatán
+    "MX-HID": { pop: 3_200_000, gdp: 30 * B, bachPct: 13.0, mhi: 13_200 }, // Hidalgo
+    "MX-CHP": { pop: 5_800_000, gdp: 28 * B, bachPct: 9.3, mhi: 9_100 }, // Chiapas
+    "MX-AGU": { pop: 1_500_000, gdp: 28 * B, bachPct: 17.2, mhi: 20_000 }, // Aguascalientes
+    "MX-OAX": { pop: 4_200_000, gdp: 26 * B, bachPct: 9.8, mhi: 11_600 }, // Oaxaca
+    "MX-GRO": { pop: 3_600_000, gdp: 24 * B, bachPct: 10.9, mhi: 10_800 }, // Guerrero
+    "MX-DUR": { pop: 1_900_000, gdp: 22 * B, bachPct: 13.7, mhi: 15_500 }, // Durango
+    "MX-MOR": { pop: 2_000_000, gdp: 19 * B, bachPct: 14.9, mhi: 14_700 }, // Morelos
+    "MX-BCS": { pop: 850_000, gdp: 18 * B, bachPct: 16.2, mhi: 23_300 }, // Baja California Sur
+    "MX-ZAC": { pop: 1_700_000, gdp: 17 * B, bachPct: 12.3, mhi: 13_400 }, // Zacatecas
+    "MX-NAY": { pop: 1_300_000, gdp: 13 * B, bachPct: 15.2, mhi: 16_600 }, // Nayarit
+    "MX-COL": { pop: 750_000, gdp: 11 * B, bachPct: 17.1, mhi: 19_200 }, // Colima
+    "MX-TLA": { pop: 1_400_000, gdp: 10 * B, bachPct: 13.7, mhi: 13_100 }, // Tlaxcala
 
     // --- Central America -----------------------------------------------
-    GTM: { pop: 18_100_000, gdp: 104 * B }, // Guatemala
-    HND: { pop: 10_800_000, gdp: 35 * B }, // Honduras
-    SLV: { pop: 6_300_000, gdp: 34 * B }, // El Salvador
-    NIC: { pop: 7_000_000, gdp: 18 * B }, // Nicaragua
-    CRI: { pop: 5_200_000, gdp: 86 * B }, // Costa Rica
-    PAN: { pop: 4_500_000, gdp: 83 * B }, // Panama
-    BLZ: { pop: 420_000, gdp: 3.3 * B }, // Belize
+    GTM: { pop: 18_100_000, gdp: 104 * B, bachPct: 4.3, mhi: 8_700 }, // Guatemala
+    HND: { pop: 10_800_000, gdp: 35 * B, bachPct: 9.6, mhi: 4_500 }, // Honduras
+    SLV: { pop: 6_300_000, gdp: 34 * B, bachPct: 8.3, mhi: 7_700 }, // El Salvador
+    NIC: { pop: 7_000_000, gdp: 18 * B, bachPct: 7.0, mhi: 3_800 }, // Nicaragua
+    CRI: { pop: 5_200_000, gdp: 86 * B, bachPct: 21.6, mhi: 23_400 }, // Costa Rica
+    PAN: { pop: 4_500_000, gdp: 83 * B, bachPct: 19.6, mhi: 27_000 }, // Panama
+    BLZ: { pop: 420_000, gdp: 3.3 * B, bachPct: 7.9, mhi: 11_500 }, // Belize
 
     // --- Caribbean ------------------------------------------------------
-    CUB: { pop: 10_900_000, gdp: 110 * B }, // Cuba (official; unreliable)
-    HTI: { pop: 11_900_000, gdp: 20 * B }, // Haiti
-    DOM: { pop: 11_400_000, gdp: 122 * B }, // Dominican Republic
-    PRI: { pop: 3_200_000, gdp: 118 * B }, // Puerto Rico
-    JAM: { pop: 2_800_000, gdp: 20 * B }, // Jamaica
-    TTO: { pop: 1_500_000, gdp: 28 * B }, // Trinidad and Tobago
-    BHS: { pop: 400_000, gdp: 14 * B }, // The Bahamas
-    BRB: { pop: 280_000, gdp: 6.9 * B }, // Barbados
-    LCA: { pop: 180_000, gdp: 2.6 * B }, // Saint Lucia
-    GRD: { pop: 113_000, gdp: 1.4 * B }, // Grenada
-    VCT: { pop: 101_000, gdp: 1.1 * B }, // St. Vincent and the Grenadines
-    ATG: { pop: 94_000, gdp: 2.1 * B }, // Antigua and Barbuda
-    DMA: { pop: 67_000, gdp: 0.7 * B }, // Dominica
-    KNA: { pop: 47_000, gdp: 1.1 * B }, // Saint Kitts and Nevis
-    VIR: { pop: 85_000, gdp: 4.7 * B }, // US Virgin Islands
-    CYM: { pop: 73_000, gdp: 7.1 * B }, // Cayman Islands
-    TCA: { pop: 47_000, gdp: 1.4 * B }, // Turks and Caicos Islands
-    VGB: { pop: 31_000, gdp: 1.7 * B }, // British Virgin Islands
-    AIA: { pop: 16_000, gdp: 0.4 * B }, // Anguilla
-    MSR: { pop: 4_400, gdp: 0.08 * B }, // Montserrat
-    ABW: { pop: 108_000, gdp: 3.9 * B }, // Aruba
-    CUW: { pop: 150_000, gdp: 3.4 * B }, // Curaçao
-    SXM: { pop: 44_000, gdp: 1.6 * B }, // Sint Maarten
-    MAF: { pop: 32_000, gdp: 0.7 * B }, // Saint-Martin (French part)
-    BLM: { pop: 11_000, gdp: 0.6 * B }, // Saint-Barthélemy
-    GLP: { pop: 380_000, gdp: 11 * B }, // Guadeloupe
-    MTQ: { pop: 350_000, gdp: 10 * B }, // Martinique
-    BES: { pop: 30_000, gdp: 0.8 * B }, // Caribbean Netherlands (Bonaire…)
+    CUB: { pop: 10_900_000, gdp: 110 * B, bachPct: 15.3, mhi: 13_400 }, // Cuba (official; unreliable)
+    HTI: { pop: 11_900_000, gdp: 20 * B, bachPct: 2.0, mhi: 2_600 }, // Haiti
+    DOM: { pop: 11_400_000, gdp: 122 * B, bachPct: 18.1, mhi: 15_400 }, // Dominican Republic
+    PRI: { pop: 3_200_000, gdp: 118 * B, bachPct: 29.1, mhi: 24_000 }, // Puerto Rico (ACS, not the GNI formula)
+    JAM: { pop: 2_800_000, gdp: 20 * B, bachPct: 6.8, mhi: 9_700 }, // Jamaica
+    TTO: { pop: 1_500_000, gdp: 28 * B, bachPct: 5.8, mhi: 29_600 }, // Trinidad and Tobago
+    BHS: { pop: 400_000, gdp: 14 * B, bachPct: 15.2, mhi: 55_500 }, // The Bahamas
+    BRB: { pop: 280_000, gdp: 6.9 * B, bachPct: 12.0, mhi: 37_700 }, // Barbados
+    LCA: { pop: 180_000, gdp: 2.6 * B, bachPct: 6.0, mhi: 19_000 }, // Saint Lucia
+    GRD: { pop: 113_000, gdp: 1.4 * B, bachPct: 6.0, mhi: 15_800 }, // Grenada
+    VCT: { pop: 101_000, gdp: 1.1 * B, bachPct: 5.0, mhi: 16_500 }, // St. Vincent and the Grenadines
+    ATG: { pop: 94_000, gdp: 2.1 * B, bachPct: 7.0, mhi: 32_100 }, // Antigua and Barbuda
+    DMA: { pop: 67_000, gdp: 0.7 * B, bachPct: 5.0, mhi: 15_300 }, // Dominica
+    KNA: { pop: 47_000, gdp: 1.1 * B, bachPct: 9.0, mhi: 33_500 }, // Saint Kitts and Nevis
+    VIR: { pop: 85_000, gdp: 4.7 * B, bachPct: 22.3, mhi: 40_000 }, // US Virgin Islands (estimated, not the GNI formula)
+    CYM: { pop: 73_000, gdp: 7.1 * B, bachPct: 29.9, mhi: 92_700 }, // Cayman Islands
+    TCA: { pop: 47_000, gdp: 1.4 * B, bachPct: 16.0, mhi: 52_000 }, // Turks and Caicos Islands
+    VGB: { pop: 31_000, gdp: 1.7 * B, bachPct: 20.0, mhi: 64_500 }, // British Virgin Islands
+    AIA: { pop: 16_000, gdp: 0.4 * B, bachPct: 11.0, mhi: 33_000 }, // Anguilla
+    MSR: { pop: 4_400, gdp: 0.08 * B, bachPct: 9.0, mhi: 22_500 }, // Montserrat
+    ABW: { pop: 108_000, gdp: 3.9 * B, bachPct: 13.0, mhi: 45_200 }, // Aruba
+    CUW: { pop: 150_000, gdp: 3.4 * B, bachPct: 14.0, mhi: 31_500 }, // Curaçao
+    SXM: { pop: 44_000, gdp: 1.6 * B, bachPct: 11.0, mhi: 55_300 }, // Sint Maarten
+    MAF: { pop: 32_000, gdp: 0.7 * B, bachPct: 10.0, mhi: 30_000 }, // Saint-Martin (French part)
+    BLM: { pop: 11_000, gdp: 0.6 * B, bachPct: 20.0, mhi: 67_500 }, // Saint-Barthélemy
+    GLP: { pop: 380_000, gdp: 11 * B, bachPct: 17.0, mhi: 40_500 }, // Guadeloupe
+    MTQ: { pop: 350_000, gdp: 10 * B, bachPct: 18.0, mhi: 43_500 }, // Martinique
+    BES: { pop: 30_000, gdp: 0.8 * B, bachPct: 11.0, mhi: 36_000 }, // Caribbean Netherlands (Bonaire…)
   })
 );
 

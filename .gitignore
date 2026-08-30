@@ -1,3 +1,8 @@
 node_modules/
 dist/
 .cache/
+public/spike-data/
+# Rebuilt in ~1.5s offline from the committed JSON above (npm run data:geometry),
+# 20 MB, and nothing ships it yet. Track it once the renderer needs it (C8).
+public/data/globe-geometry.bin
+public/data/globe-geometry.json

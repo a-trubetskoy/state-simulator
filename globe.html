@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>C2 — globe renderer core</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --ink: #e7e9ec;
+        --dim: #8b929c;
+        --panel: #16181d;
+        --line: #2a2e36;
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        background: #0d0f12;
+        color: var(--ink);
+        font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+        display: grid;
+        grid-template-columns: 1fr 300px;
+        grid-template-rows: 100%;
+        overflow: hidden;
+      }
+      #stage { position: relative; min-width: 0; }
+      #gl { width: 100%; height: 100%; display: block; cursor: grab; }
+      #gl:active { cursor: grabbing; }
+      aside {
+        background: var(--panel);
+        border-left: 1px solid var(--line);
+        padding: 14px;
+        overflow-y: auto;
+      }
+      h1 { font-size: 13px; margin: 0 0 2px; letter-spacing: 0.02em; }
+      h2 {
+        font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+        color: var(--dim); margin: 18px 0 6px; font-weight: 600;
+      }
+      #env { color: var(--dim); font-size: 11px; margin: 0 0 4px; }
+      .row {
+        display: flex; justify-content: space-between; gap: 10px;
+        padding: 2px 0; font-variant-numeric: tabular-nums;
+      }
+      .row span { color: var(--dim); }
+      label { display: flex; align-items: center; gap: 7px; padding: 2px 0; cursor: pointer; }
+      label .n { margin-left: auto; color: var(--dim); font-size: 11px; font-variant-numeric: tabular-nums; }
+      .layer {
+        display: flex; align-items: center; gap: 6px;
+        padding: 1px 4px 1px 0; border-radius: 4px;
+        border-top: 1px solid transparent; border-bottom: 1px solid transparent;
+      }
+      .layer:hover { background: #1d212880; }
+      .layer label { flex: 1; min-width: 0; padding: 1px 0; }
+      .layer .n {
+        color: var(--dim); font-size: 11px; font-variant-numeric: tabular-nums;
+        flex: none;
+      }
+      .layer .grip {
+        color: #565d69; cursor: grab; flex: none;
+        font-size: 12px; line-height: 1; letter-spacing: -1px; user-select: none;
+      }
+      .layer:active .grip { cursor: grabbing; }
+      .layer.dragging { opacity: 0.4; }
+      .layer.over-top { border-top-color: #6aa9de; }
+      .layer.over-bottom { border-bottom-color: #6aa9de; }
+      .note { color: var(--dim); font-size: 11px; margin: 6px 0; }
+      button {
+        background: #22262e; color: var(--ink); border: 1px solid var(--line);
+        border-radius: 5px; padding: 5px 10px; font: inherit; cursor: pointer;
+      }
+      button:hover { background: #2b303a; }
+      .buttons { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+      hr { border: 0; border-top: 1px solid var(--line); margin: 14px 0; }
+      #error {
+        position: absolute; inset: 12px; background: #2a1417; border: 1px solid #6b2732;
+        color: #ffd9dd; padding: 12px; border-radius: 6px; overflow: auto;
+        font: 11px/1.4 ui-monospace, monospace; white-space: pre-wrap; display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="stage">
+      <canvas id="gl"></canvas>
+      <pre id="error"></pre>
+    </div>
+    <aside>
+      <h1>C2 — renderer core</h1>
+      <p id="env">loading…</p>
+
+      <h2>view</h2>
+      <div id="readout"></div>
+      <div class="buttons">
+        <button data-zoom="1">home</button>
+        <button data-zoom="4">4x</button>
+        <button data-zoom="16">16x</button>
+      </div>
+      <p class="note">drag to turn · shift-drag or right-drag to pan · wheel to zoom</p>
+
+      <hr />
+      <h2>pick</h2>
+      <div id="pick"></div>
+      <p class="note">
+        Ray-sphere unproject, then a lon/lat grid over the source rings. No
+        picking buffer and no readback, so the tint keeps up through a drag
+        instead of pausing for the gesture.
+      </p>
+
+      <hr />
+      <h2>carve</h2>
+      <label><input type="checkbox" id="carve-on" /> knife armed</label>
+      <label><input type="checkbox" id="carve-intact" /> keep tracts intact</label>
+      <p class="note">
+        Armed, a drag draws a cut instead of turning the globe. Draw in one side
+        of a county and out the other. By default the piece boundary IS the drawn
+        line — tracts straddling it are split and their numbers divided by area.
+        Ticked, tracts stay whole and each joins the side its centre falls on,
+        which is what a preset naming tract GEOIDs has always meant.
+      </p>
+      <div id="carve-out"></div>
+      <div class="buttons">
+        <button id="carve-copy">copy piece JSON</button>
+        <button id="carve-reset">rejoin all</button>
+      </div>
+      <p id="carve-note" class="note"></p>
+
+      <hr />
+      <h2>checks</h2>
+      <label><input type="checkbox" id="tint" /> tint units</label>
+      <p class="note">Deterministic colour per unit id, through the palette texture. Proves the palette and band paths.</p>
+      <label><input type="checkbox" id="labels-on" checked /> state labels</label>
+      <p class="note">
+        Laid out once over a Mercator raster and kept in lon/lat, so a turn
+        re-projects the baselines instead of rebuilding the layout.
+      </p>
+      <label><input type="checkbox" id="spin" /> spin</label>
+      <p id="startup" class="note"></p>
+
+      <hr />
+      <h2>layers</h2>
+      <p class="note">painter's order — top of the list draws first, so the bottom row wins. drag a row to move it.</p>
+      <div id="layers"></div>
+      <div class="buttons">
+        <button id="dump">copy order</button>
+      </div>
+    </aside>
+    <script type="module" src="/src/globe/dev.js"></script>
+  </body>
+</html>

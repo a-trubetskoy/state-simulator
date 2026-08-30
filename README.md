@@ -22,21 +22,22 @@ The prebuilt data files live in `public/data/`, so this is all you need.
 ```
 npm run data
 npm run data:tracts
+npm run data:world
 ```
 
 The first downloads the sources, merges them by unit id, and rewrites `public/data/`.
 The second builds the per-county census-tract files behind carving (51 state shapefiles, ~84,000 tracts, ~3,150 files) and needs the first to have run.
+The third builds the scenery land — the rest of the world's coastlines, borders and lakes, so the globe isn't bare outside North America — and reuses two downloads the first one caches.
 Downloads are cached in `.cache/`.
 
 ## Turning the globe
 
-The map is drawn on an actual globe, and the **Globe** button lets you turn it.
-It pulls the view back to show the whole sphere; drag to spin it, and the map redraws facing wherever you stopped.
-While you drag you see a simplified outline, and the full map — fills, borders, labels and all — comes back the moment you let go.
-Turning the button off drops you back into the normal atlas view, framed on whatever you turned to rather than on the lower 48.
-Reset view faces the globe home again along with undoing the pan and zoom.
+The map is drawn on an actual globe, and dragging it turns the sphere instead of panning the picture, so the map redraws facing wherever you stop.
+Zoom out if you want the whole globe in view at once: the view goes that far back, and the home view starts framed on the land.
+Reset view faces the globe home again along with undoing the zoom.
 
-Today everything on the globe is North America, so turning it mostly shows you ocean.
+Everything paintable on the globe is North America; the other continents are drawn behind it as scenery, so you can see where you are, but nothing there can be clicked, painted, or counted yet.
+They are drawn the way the map draws its own unpainted ground, though — the same tan, the same blue coastline and halo, a hairline between countries and water in the lakes — so the world reads as one map rather than as a continent laid over a silhouette.
 The point is that the map no longer assumes the continent it happens to hold: adding another part of the world is now a question of data, not of rebuilding the renderer.
 
 ## Carving counties

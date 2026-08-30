@@ -12,16 +12,17 @@ Every Mexican state and Caribbean or Central American country is on the map as a
 All of them are drawn in a faint tan: on the map, but not in the union.
 You can paint any county or division into a new state, load a preset like Deseret or New England, or paint a whole province into a state — at which point it counts toward that state's population, GDP, House seats, and electoral votes like anywhere else.
 Clicking anything outside the union offers an "Add as US state" button in the state panel, which admits that whole province or country as a state of its own: it keeps its name and territory, takes a state color, and joins the rankings, the House apportionment, and the electoral college (its electoral votes count as won by neither side, since it cast no 2024 vote).
-Rankings for population, land area, GDP, GDP per capita, household income, education, race/ethnicity shares, the 2024 presidential margin, and electoral votes update live — including for the leftover donor states.
+Rankings for population, land area, GDP, GDP per capita, household income, education, life expectancy, race/ethnicity shares, the 2024 presidential margin, and electoral votes update live — including for the leftover donor states.
 Units outside the union stay out of every ranking while they stand there; once painted into a state, whatever they carry counts through that state.
-Canadian divisions carry population, GDP, median household income, and education; Mexican states and the countries carry population and GDP only.
-None of them carry race/ethnicity or 2024 vote counts, because neither has an equivalent published on the US definitions.
+Canadian divisions carry population, GDP, median household income, and education from real census figures; Mexican states and the Caribbean/Central American countries carry population, GDP, education, and income too, but the latter two are rough hand-compiled estimates rather than a matched survey (see the sourcing note in `scripts/na-unit-data.mjs`) — good enough to rank, not to cite.
+None of them carry race/ethnicity, life expectancy, or 2024 vote counts: race and the vote have no equivalent published on the US definitions, and life expectancy simply has no non-US source in the pipeline yet.
 A small elections panel replays the 2024 vote on your map: the House is reapportioned to 435 seats (Huntington–Hill), each state's electoral votes follow, and the president is tallied winner-take-all per state (DC keeps its 3 electoral votes; units still outside the union are excluded).
 A toggle on the map switches between the atlas view (the usual colored states) and a data view that draws the selected stat itself: population and electoral votes as scaled circles, GDP as scaled squares, and the per-capita, income, education, race, and margin stats as state-level choropleths.
 
-The projection is an orthographic globe centered on the continent.
-Pan and zoom move the picture rather than the sphere, but the sphere itself can now be turned: the Globe button frames the whole globe and lets you drag it to face anywhere, and the map re-projects to that facing.
-The home view frames the lower 48; the rest of North America is context to pan and zoom out into.
+The projection is an orthographic globe centered on the continent, with the rest of the world's land drawn behind the map as scenery.
+Zoom moves the picture rather than the sphere; a drag turns the sphere itself, so the map can face anywhere, and it re-projects to that facing.
+The zoom's floor is "fit the sphere" rather than "fit the land", so the whole globe is reachable by zooming out; the home view starts framed on the lower 48.
+The rest of North America is context to turn and zoom out into.
 Alaska and Hawaii render in place on the globe, and are also duplicated into two inset boxes so they stay usable while the view is parked on the lower 48.
 The insets are fixed to the UI, not to the map: they render on their own canvas with a fixed camera, pinned at constant pixel size just above the bottom-left buttons, so panning and zooming the map leaves them put.
 The Alaska inset frames the state's main body rather than the entire Aleutian chain; the chain cuts off at the frame, the way printed atlases crop it.
@@ -39,10 +40,12 @@ Vanilla JavaScript + [D3](https://d3js.org/), bundled with Vite. No framework.
 - `src/split.js` — county carving: reconciling tract detail with the drawn map, dividing a county's row without moving any total, and re-owning borders as carves accumulate
 - `scripts/build-data.mjs` — the data pipeline described below
 - `scripts/build-tracts.mjs` — the per-county tract files behind carving (`npm run data:tracts`)
+- `scripts/build-world.mjs` — the scenery land beyond the map's own units (`npm run data:world`)
+- `scripts/build-geometry.mjs` — the shipped JSON compiled to unit-sphere triangles and line segments (`npm run data:geometry`), for the globe renderer described in `globe-rewrite-plan.txt`. Nothing loads it yet; the map still projects on the CPU.
 - `scripts/geo-lib.mjs` — the caching downloader and simplification repairs both pipelines share
 - `scripts/na-unit-data.mjs` — the static population/GDP table for non-US units, which doubles as the provincial control totals Canada's divisions are apportioned from
 - `scripts/split-check.mjs` — browserless checks of the carve logic against the real data
-- `scripts/globe-check.mjs` — browserless checks of the projection: that the atlas view is unchanged, and that turning the globe keeps producing drawable geometry
+- `scripts/globe-check.mjs` — browserless checks of the projection: that the atlas view is unchanged, that turning the globe keeps producing drawable geometry, and that the spin preview and the scenery land stay cheap and right way round
 
 State borders are not stored anywhere: they are recomputed on every change as the topological boundary between units assigned to different states (`topojson.mesh` with a filter), which is what lets borders redraw instantly as you paint.
 The atlas-style tinted band along every border is a single translucent near-black stroke on that mesh: compositing black at low opacity multiplies the fill underneath, so each side of a border reads as a band of its own state's color.
@@ -75,18 +78,20 @@ The US side of the seam keeps the full treatment as the union's outer edge, and 
 | File | Contents | Source |
 | --- | --- | --- |
 | `na-counties-topo.json` | County boundaries (50 states + DC), Canada's census divisions, plus one unit per Mexican state and Caribbean / Central American country | Census cartographic boundary file, 2023 (5m); Statistics Canada census division cartographic boundary file, 2021; Natural Earth 10m admin-0 / admin-1 (lakes variants) |
-| `na-map-overlays.json` | Classified map boundary (coast / lakeshore / land border), the US–Canada/Mexico border seam, notable lakes | Derived from the boundary files + Natural Earth |
+| `na-map-overlays.json` | Classified map boundary (coast / lakeshore / land border), the US–Canada/Mexico border seam, notable lakes | Derived from the boundary files + Natural Earth 10m lakes; TIGER 2023 area hydrography for the water Natural Earth files as coastal |
 | `tracts/<county>.json` | Census-tract boundaries and ACS shares, one file per US county, loaded lazily when a county is carved (built by `npm run data:tracts`) | Census cartographic boundary files cb_2023_*_tract_500k; ACS 2019–23 5-year (B01003, B19013, B15003, B03002) |
 | `na-county-data.json` | Population | Census county population estimates, vintage 2025 |
 | | GDP | BEA county GDP (CAGDP2), 2024, current dollars |
 | | Median household income | Census SAIPE, 2023 |
 | | Race/ethnicity counts | Census county characteristics estimates (ASRH), vintage 2025 |
 | | Educational attainment (adults 25+) | USDA ERS county data (ACS 5-year counts) |
+| | Life expectancy (US counties only) | County Health Rankings & Roadmaps analytic file, 2021–23 (NCHS mortality + Census population) |
 | | 2024 presidential results | County-level returns ([tonmcg/US_County_Level_Election_Results](https://github.com/tonmcg/US_County_Level_Election_Results_08-24)) |
 | | Canadian division population | StatCan population estimates by census division, 2021 boundaries (17-10-0152) |
 | | Canadian division income, education, earnings | 2021 Census Profile, census divisions (98-401-X2021004) |
 | | Canadian provincial income growth, 2020→2023 | StatCan T1 Family File, income of census families (11-10-0009) |
 | | Non-US population & GDP | Hand-compiled table in `scripts/na-unit-data.mjs` (national statistics agencies / World Bank, 2023–24) |
+| | Non-US education & income | Same table: Mexico from INEGI census 2020 & ENIGH 2024; other countries' education from national censuses/UNESCO/World Bank (years vary); other countries' income from World Bank GNI per capita × a flat household-pooling factor — rough estimates, see the sourcing note in the file |
 
 ## Geometry
 
@@ -114,6 +119,61 @@ The US side of the seam keeps the full treatment as the union's outer edge, and 
 - State land area for the "Land area" ranking is computed at load time from this same unit geometry — each unit's spherical polygon area (d3-geo's `geoArea`, at Earth's mean radius) summed by state — rather than pulled from a separately published table, so it can never drift from what the map draws.
   The Census and StatCan cartographic files it starts from already exclude the Great Lakes and other named water, matching the usual "land area" convention, but the same 1.6 km simplification and sub-0.5 km² island dropping that keep the map light also shave a bit off whichever state's coastline is most convoluted (Alaska, by far): the ranking reads a few percent low there against the published figure, while boxier interior states land almost exactly on it.
 
+### Scenery land
+
+The rest of the world is drawn behind the map, so the globe shows a world rather than one continent adrift on a blank sphere.
+It is scenery and nothing more: no unit belongs to it, nothing hovers, nothing paints, and it enters no total.
+`scripts/build-world.mjs` builds it from the Natural Earth 10m admin-0 and 10m lakes files the main pipeline already caches, through the same simplify/despeckle/rewind pipeline the map runs.
+It adds the Census-only lakes described under Lakes below.
+The land is thinned at 6 km rather than the map's 1.6 km, since it is only ever read at continental zoom.
+That coarser tolerance is most of what keeps the file to 1.75 MB, against the 1.83 MB the map's own counties cost.
+The lakes are the one exception and keep every point Natural Earth gave them, for the reason under Lakes below.
+
+The countries the map draws itself are left out of the file rather than covered over by it.
+The US and Canada come from the Census and StatCan cartographic files, whose coastlines disagree with Natural Earth's by a few km, so a Natural Earth copy underneath would show as a tan fringe outside the drawn shore wherever it ran wider.
+Dropping USA, CAN, MEX and the Caribbean/Central America subregions — exactly the coverage the map's own units have — is exact instead: what is left abuts them along Natural Earth's own edge-matched borders, so there is nothing to fringe and nothing to hide.
+It costs about 35 ms of the ~130 ms settle, and the spin preview carries a coarsened copy so the world does not blink out mid-drag.
+
+The scenery wears what the map's own unpainted ground wears, rather than a style of its own: the same tan a non-union unit carries, a white hairline between neighbours, a blue shoreline with the same halo behind it, and water blue in the lakes.
+What marks the map out is not a duller tan — it is that the map's ground takes state colours, hover, labels, names and paint, and none of that reaches here.
+A tan of its own had the opposite effect of the one intended: the only place the two kinds of land touch is Colombia's border with Panama, and a deeper shade put a visible step across it.
+
+Four objects come out of the file and they all share one set of arcs, so each line lands exactly on the edge of the shape it belongs to: `land`, `lakes`, `coast` (every edge where the scenery meets water) and `borders` (every edge where it meets another scenery country).
+Splitting the two meshes needs to know what lies on the far side of an edge, so the map's own countries go into the topology alongside the rest and are dropped at the end, when the topology is rebuilt from what survives.
+That is what lets the Panama seam fall out of both meshes: it is the one edge with the map on one side and the scenery on the other, and the map already draws it as its own dark border line.
+Without that step it would read as a coastline and be drawn blue, a few km off the border the map draws.
+
+Natural Earth has a seam of its own, where it cuts the two countries that straddle the antimeridian in half and closes each half along it — Russia through Chukotka, Fiji through its eastern islands.
+That edge has to stay in the land, which needs closed rings, but it is not a shore, so the coastline is broken wherever it meets one: the real shore either side is untouched and the join between them goes undrawn.
+Left in, it drew a straight blue line and its halo 700 km down the middle of the Chukotka Peninsula.
+
+Lakes are drawn over the land rather than carved out of it, because Natural Earth carves only the largest ones — Baikal, Ladoga, Balkhash, Victoria, Tanganyika, Malawi, Albert and the Aral remnants — and leaves the rest sitting inside the countries they belong to.
+Drawing them over covers both cases with one layer: over a hole it fills it, over a country it hides that much of it.
+It also settles the halo, which follows every edge in the `coast` mesh including the shore of a carved lake: the halo goes under the land, the lake goes over it, so what would have ringed Baikal in sea blue is covered by Baikal.
+There is no area floor: all 1,355 lakes in the file are drawn.
+There used to be one, at 1,000 km².
+It was picked to clear two bars — every lake the admin-0 file carves out of the land had to be covered, the smallest being the North Aral Sea at 3,400 km², and the rest had to reach about as far down the list as a reader expects on a world map.
+Taking the file whole is simpler than defending a threshold, and it costs little: 163,000 points against 93,000.
+Natural Earth 10m is also the finest tier they publish, so there is no deeper list this could have fallen back to.
+One consequence is that the despeckle pass has to spare the lakes.
+It drops rings under 10 km², and 52 lakes are smaller than that, so only the land faces that floor.
+Nineteen lakes still come out with no area at all, because the file quantizes to a 400 m grid.
+Every one of those is a Natural Earth speck under 0.01 km², which is about 70 m across and under a pixel at any zoom this layer is drawn at.
+The lakes inside North America are kept rather than filtered out: the map draws its own territory over this layer, so its own Great Lakes cover them.
+
+One lake is not Natural Earth's at all.
+Natural Earth's lake layer carries inland water, and where it judges a body to be coastal instead, that body is in no lake file it publishes.
+Lake Pontchartrain is the case that matters here: it is absent from `ne_10m_lakes` and from the North America supplement, and Natural Earth's own Louisiana polygon stops at its shore, treating it as a bay.
+The Census disagrees, and the Census is what draws this map — its parishes run straight across the lake, so nothing carves it out of the land and no Natural Earth lake covered it back up.
+The map drew 1,600 km² of solid parish where the water is.
+Water in that position, covered by the map's own units and absent from Natural Earth, comes from the Census's own hydrography instead: `CENSUS_LAKES` in `scripts/geo-lib.mjs` names each such lake and the counties it spans, and both lake sets read it — `na-map-overlays.json`, where the map's own water lives, and this file, whose lake set is what the globe renderer actually draws over the county fills.
+
+TIGER splits a water body at county lines, so the six parish pieces have to be put back together.
+They overlap by a few metres rather than sharing arcs, and `topojson.merge` only dissolves an arc that two polygons share, so it leaves spurious rings behind: sliver polygons off the outline, and holes along each parish line and under the causeway's right-of-way.
+The outline itself comes out right, so only outer rings above 1 km² are kept.
+Rasterized against the source pieces at 160 m, that covers all but 0.1 km² of their 1,631 km², and adds back the 5.5 km² the artifacts would otherwise cut out of the middle of the lake.
+TIGER also draws hydrography far finer than anything else on the map, so it is thinned to Natural Earth 10m's grain rather than kept whole: 500 m puts the median segment at 1.5 km, which is Natural Earth's own median, and takes Pontchartrain from 12,036 points to 121 while holding its area to within 0.5%.
+
 ## Data merge
 
 - BEA reports some small independent cities combined with a neighboring county (mostly in Virginia).
@@ -123,12 +183,19 @@ The US side of the seam keeps the full treatment as the union's outer edge, and 
 - Race/ethnicity counts (not-Hispanic white/Black/Native/Asian alone, plus Hispanic of any race) are additive, so custom-state shares are exact.
 - Median household income for a state is the population-weighted mean of its county medians, since medians aren't additive.
   It tracks published state medians closely but not exactly.
+- Life expectancy for a state is likewise the population-weighted mean of its county estimates, the same non-additive approximation as median household income.
+  County Health Rankings & Roadmaps reports no value for a county with fewer than 5,000 population-years-at-risk in the window, and for Connecticut's nine planning regions specifically: NCHS hasn't recomputed life expectancy for that geography yet, so Connecticut carries none until it does.
+  A carved county's pieces all inherit the parent county's value unchanged, since life expectancy has no census-tract-level source to split by.
 - Alaska reports election results by state house district, not county.
   The script sums them to a statewide total and allocates it to county-equivalents by population, so Alaska's state-level margin is exact and only its county-level split is approximate.
 - Kalawao County, HI (population under 100) reports its votes with Maui County, so it carries no vote data of its own.
 - Non-US population and GDP are rounded static estimates, compiled by hand in `scripts/na-unit-data.mjs` with per-row sources.
   GDP is in thousands of current US dollars, matching the BEA county units, so foreign units sum and rank directly against US counties.
   Cuba's GDP is the official figure and is widely considered unreliable.
+- Non-US education and income (bachelor's-or-higher share and household income, for Mexico and the Caribbean/Central American countries) are looser estimates than everything else in the pipeline, since almost none of these places publish a survey matched to what the US/Canada figures measure.
+  Mexico's numbers come from a real INEGI census and household-income survey; every other country's education figure is whatever year and source was actually published (some decades old, a few outright estimated), and its income figure is World Bank GNI per capita scaled by a flat household-pooling factor rather than a measured household income.
+  Puerto Rico and the US Virgin Islands use a directly known/estimated income figure instead of that formula, since the GNI-based estimate overshoots there.
+  The full reasoning and per-region caveats live in the comment at the top of `scripts/na-unit-data.mjs`.
 - Canadian population is published per census division, on the same 2021 boundaries as the geometry, and at the same vintage as the US county estimates it ranks against.
   A province is simply the sum of its divisions.
 - Statistics Canada publishes no GDP below the province, so each province's published total is split across its divisions by their share of aggregate employment income (recipients × average earnings), the finest-grained measure of where a province's earnings actually are.
@@ -164,7 +231,7 @@ The projection used to be a literal buried in one expression, which quietly hard
 It is a parameter now, so the same renderer, masks, labels, hover and carving work at any facing — which is what adding a region beyond North America later needs.
 Nothing about that promise is speculative: `scripts/globe-check.mjs` projects the counties at several facings and checks that the geometry stays finite, stays inside the sphere's disc, and clips the far hemisphere away rather than folding it onto the near one.
 
-Three decisions carry the design.
+Four decisions carry the design.
 
 **The fit runs once; scale and translate are then frozen.**
 `fitSize` is still what places the lower 48 in the 975x610 design box, exactly as before, but only at the home facing.
@@ -181,9 +248,18 @@ Re-baking keeps one projection and one source of truth, and every one of those c
 **A spin previews coarsely and settles precisely.**
 A full re-bake is about 130 ms, which is fine once at the end of a drag and hopeless at 60 fps.
 Thinning the full map does not rescue it: the cost is dominated by per-geometry stream overhead across ~3,400 counties and ~20,000 arcs, so even a heavily decimated full map sits around a 55 ms floor.
-So a drag re-projects one already merged land outline instead — the sphere, that silhouette, and the graticule are the only three things cheap enough per frame — and the full stack comes back on release.
-Making that outline cheap is mostly about dropping rings, not points: most of the merged outline's rings are already short (every lake islet and offshore rock), so a stride hits its don't-collapse floor on thousands of them and the point count barely moves.
+So a drag re-projects one merged, thinned outline per state instead — about 130 shapes and 12,500 points, roughly 4 ms a frame beside the sphere and the graticule — and the full stack comes back on release.
+Merging per state rather than merging the continent whole is what lets the preview keep the map's own colors, which is the point: a turn that greys the map out reads as a glitch rather than as a preview.
+The shapes come off the shared topology, so neighbors still tile exactly and the preview needs no white backing under them.
+Merging costs ~50 ms, so it is cached until territory changes hands, and paid at startup rather than on the first frame of a drag.
+Making the outlines cheap is mostly about dropping rings, not points: most of a merged outline's rings are already short (every lake islet and offshore rock), so a stride hits its don't-collapse floor on thousands of them and the point count barely moves.
 Dropping rings under a quarter degree first, then thinning, takes the preview from 15 ms to about 4 ms a frame, and the check holds it there.
+The one ring a state cannot afford to lose to that filter is its only one: DC is 0.15 degrees across, and dropping it would punch a hole in the land where it belongs, so the widest polygon of a state survives at any size.
+
+**The labels sit out the drag.**
+State names are placed by a raster built against the facing of the last bake, and they ride the SVG overlay rather than the canvas, so leaving them up strands them over the wrong ground while the globe turns underneath.
+A class on the SVG hides them for the length of the gesture, and the settle rebuilds the labeler, so they come back in the same frame as the baked map.
+The inset boxes keep theirs — the boxes do not turn.
 
 A rotation rebuilds more than the geometry, because several things are derived from it and cached.
 The label raster is sized from the land's projected bounds at construction, so the labeler is rebuilt rather than updated.

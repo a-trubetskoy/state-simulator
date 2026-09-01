@@ -235,15 +235,51 @@ export function createRenderer(gl, geometry, camera) {
   const view = { dataView: false, selected: false };
   let selectionColor = COLORS.outline;
 
+  // How far in a layer with a zoom range has come: 0 below it, 1 above it, and
+  // a straight ramp across it. Read off camera.view.k — d3.zoom's own scale
+  // factor, the number the user turns — rather than off radiusPx, so a layer
+  // appears at the same zoom whatever size the window is.
+  //
+  // A zoom already redraws the scene (setTransform bumps the camera version, and
+  // the scene texture is cached against it), so this costs nothing but the
+  // arithmetic: no extra pass, no per-instance test, and a tier that has not
+  // arrived is a draw call that never runs.
+  const fadeAt = (layer) => {
+    if (!layer.fadeIn) return 1;
+    const [k0, k1] = layer.fadeIn;
+    return Math.max(0, Math.min(1, (camera.view.k - k0) / (k1 - k0)));
+  };
+
+  // How wide a layer draws right now. Widths are in css px and stay there — a
+  // stroke measured on the ground would grow sixteenfold across the zoom range
+  // and swamp the map. `grow` is the middle course: the width ramps to a
+  // multiple of itself over a zoom range and stops, so a line can read as a
+  // hairline at the wide views and as a feature at the close ones. Multiplying
+  // rather than adding is what keeps a taper intact — the river tiers stay in
+  // the same proportion to each other at every zoom.
+  const widthAt = (layer) => {
+    if (!layer.grow) return layer.width;
+    const [k0, k1, factor] = layer.grow;
+    const t = Math.max(0, Math.min(1, (camera.view.k - k0) / (k1 - k0)));
+    return layer.width * (1 + (factor - 1) * t);
+  };
+
   // What a layer draws right now.
   const hidden = (layer) =>
     !layer.enabled ||
     (layer.hideInData && view.dataView) ||
-    (layer.mode === MODE.outline && !view.selected);
-  const colorOf = (layer) =>
-    layer.role === "selection"
-      ? selectionColor
-      : (view.dataView && layer.dataColor) || layer.color;
+    (layer.mode === MODE.outline && !view.selected) ||
+    fadeAt(layer) === 0;
+  const colorOf = (layer) => {
+    const color =
+      layer.role === "selection"
+        ? selectionColor
+        : (view.dataView && layer.dataColor) || layer.color;
+    const fade = fadeAt(layer);
+    // A copy, and only mid-fade: the colours in the table are shared constants,
+    // and scaling one in place would restyle every layer that names it.
+    return fade === 1 ? color : [color[0], color[1], color[2], color[3] * fade];
+  };
   // Counted over the SCENE pass, so they hold steady on a hover-only frame
   // instead of ticking up. Presenting and tinting are two more draw calls, and
   // always exactly two.
@@ -406,7 +442,7 @@ export function createRenderer(gl, geometry, camera) {
     // The antialiasing ramp is ONE DEVICE pixel. Scaling it by dpr makes every
     // quad six device px wide to draw a two px stroke.
     gl.uniform1f(p.u.uFeather, 1.0);
-    gl.uniform1f(p.u.uHalfWidth, Math.max(0.35, (layer.width * dpr) / 2));
+    gl.uniform1f(p.u.uHalfWidth, Math.max(0.35, (widthAt(layer) * dpr) / 2));
     gl.uniform1i(p.u.uSkipEqual, layer.skipEqual ? 1 : 0);
     gl.uniform1i(p.u.uMode, layer.mode ?? MODE.plain);
     gl.uniform4fv(p.u.uColorB, layer.colorB ?? color);

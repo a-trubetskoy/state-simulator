@@ -22,6 +22,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p) => readFileSync(join(root, p), "utf8");
 
 const { buildLayers, BAND_GROUPS, MODE } = await import("../src/globe/layers.js");
+const { MAX_ZOOM } = await import("../src/globe/camera.js");
 const S = await import("../src/globe/shaders.js");
 
 let failed = 0;
@@ -84,6 +85,117 @@ const unpaired = layers
   .filter((l) => l.mode && l.mode !== MODE.plain)
   .flatMap((l) => groupsOf(l).filter((g) => !paired.has(g)));
 ok("no mode reads unit sides off a group that has none", unpaired.length === 0, unpaired.join(", "));
+
+// ---------------------------------------------------------------- zoom fades
+
+// A layer with a zoom range is absent below it and ordinary above it, so a
+// range written backwards makes a layer that never draws — and nothing else
+// would say so, because a layer that never draws looks exactly like a layer
+// that is simply not there yet.
+console.log("\nzoom fades");
+const faded = layers.filter((l) => l.fadeIn);
+const badRange = faded.filter(
+  (l) => !Array.isArray(l.fadeIn) || l.fadeIn.length !== 2 || !(l.fadeIn[0] < l.fadeIn[1])
+);
+ok(
+  `every fadeIn is a range, low end first (${faded.length} layers)`,
+  badRange.length === 0,
+  badRange.map((l) => l.name).join(", ")
+);
+
+// A tier series — the rivers, the lake fills, the lake shores — is an ordered
+// thing: each tier holds what only matters once you are closer in than the tier
+// before it. Two ways that can go wrong, and neither shows on screen as an
+// error. Named out of step with the compiler, a tier draws the wrong geometry.
+// Faded out of order, or with two ranges overlapping, tiers arrive together or
+// backwards — a tier of tributaries drawing with the river they join still
+// missing, or two half-drawn tiers reading as a wash.
+const series = (bag, pattern, what) => {
+  const tiers = layers.filter((l) => groupsOf(l).some((g) => pattern.test(g)));
+  const named = tiers.flatMap(groupsOf).filter((g) => pattern.test(g));
+  const compiled = Object.keys(bag).filter((g) => pattern.test(g));
+  ok(
+    `the table draws every compiled ${what} tier (${compiled.length})`,
+    compiled.length > 0 && named.join() === compiled.join(),
+    `table ${named.join(", ")} vs manifest ${compiled.join(", ")}`
+  );
+
+  let reach = 0;
+  const outOfOrder = [];
+  for (const l of tiers) {
+    const [k0, k1] = l.fadeIn ?? [0, 0];
+    if (k0 < reach) outOfOrder.push(l.name ?? groupsOf(l).join());
+    reach = Math.max(reach, k1);
+  }
+  ok(`the ${what} tiers fade in in order, no two at once`, outOfOrder.length === 0, outOfOrder.join(", "));
+  return tiers;
+};
+
+series(manifest.lines, /^rivers\d+$/, "river");
+const lakeFills = series(manifest.fills, /^worldLakes\d+$/, "lake");
+const lakeShores = series(manifest.lines, /^worldLakeEdges\d+$/, "lake shore");
+
+// A tier's water and its shore have to arrive together. Split, one of them is an
+// outline around nothing or a slab of blue with no edge, for however many zoom
+// steps separate the two ranges.
+const fadeKey = (l) => (l.fadeIn ? l.fadeIn.join("-") : "always");
+const mismatched = lakeFills
+  .map((f, i) => [f, lakeShores[i]])
+  .filter(([f, e]) => !e || fadeKey(f) !== fadeKey(e))
+  .map(([f, e]) => `${f.name} ${fadeKey(f)} vs ${e ? `${e.name} ${fadeKey(e)}` : "no shore"}`);
+ok(
+  "each lake tier's water and shore fade together",
+  lakeFills.length === lakeShores.length && mismatched.length === 0,
+  mismatched.join("; ")
+);
+
+// ------------------------------------------------------------- zoom growth
+
+// A width that ramps with the zoom has two ways to be quietly wrong. A range
+// topping out past MAX_ZOOM is a width the camera can never reach, so the layer
+// draws thinner than it was written to at the closest view the map has. A factor
+// under 1 thins a line as you close in, which is the opposite of the point.
+console.log("\nzoom growth");
+const growing = layers.filter((l) => l.grow);
+const badGrow = growing.filter((l) => {
+  if (!Array.isArray(l.grow) || l.grow.length !== 3) return true;
+  const [k0, k1, factor] = l.grow;
+  return !(k0 < k1) || k1 > MAX_ZOOM || !(factor >= 1);
+});
+ok(
+  `every grow is a range up to MAX_ZOOM (${MAX_ZOOM}) with a factor of 1 or more (${growing.length} layers)`,
+  badGrow.length === 0,
+  badGrow.map((l) => `${l.name} ${JSON.stringify(l.grow)}`).join(", ")
+);
+
+// The river tiers taper against each other by width, so they have to grow by
+// the same range and the same factor or the taper closes up at one end of the
+// zoom and the tiers stop reading as a hierarchy.
+const riverGrows = new Set(
+  layers
+    .filter((l) => groupsOf(l).some((g) => /^rivers\d+$/.test(g)))
+    .map((l) => JSON.stringify(l.grow ?? null))
+);
+ok(
+  "the river tiers all grow by the same range and factor",
+  riverGrows.size === 1,
+  [...riverGrows].join(" vs ")
+);
+
+// Water that is a HOLE in the land can never fade, and this is the one check
+// that says so. Natural Earth carves its largest lakes out of the countries it
+// draws and the Census file carves the Great Lakes out of the counties, so
+// those lakes are holes: drawn empty they show the ocean through the middle of
+// a continent, and the coast halo hiding under the land rings them in sea blue.
+// build-world.mjs pins every carved lake to the first tier; this holds that tier
+// and the two carved-lake layers to no fade at all.
+const unfadable = ["worldLakes1", "worldLakeEdges1", "lakesUnder", "lakeEdgesUnder"];
+const faders = layers.filter((l) => l.fadeIn && groupsOf(l).some((g) => unfadable.includes(g)));
+ok(
+  "the lakes carved out of the land never fade",
+  faders.length === 0,
+  faders.map((l) => `${l.name} fades in at ${l.fadeIn[0]}`).join(", ")
+);
 
 // Every fill and line group the compiler emits should be drawn by something, or
 // it is 20 MB of buffer nobody reads.

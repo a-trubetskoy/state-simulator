@@ -59,6 +59,8 @@ try {
   // which are fetched per county on first cut and remembered — including the
   // "no data here" answer.
   const tractFiles = new Map();
+  const foreignStates = new Set(countyData.foreign ?? []);
+  const homeStateOf = new Map(units.map((u) => [u.id, u.st]));
   carver = createCarver({
     units,
     unitIndex,
@@ -73,6 +75,10 @@ try {
         } catch {
           // unreachable or malformed — remembered as no data
         }
+        // A unit outside the US has no tract file by nature rather than by
+        // accident, so it carves as one tract covering the whole of it —
+        // the same rule the app applies (see src/main.js).
+        if (!payload && foreignStates.has(homeStateOf.get(fips))) payload = { whole: true };
         tractFiles.set(fips, payload);
       }
       return tractFiles.get(fips);

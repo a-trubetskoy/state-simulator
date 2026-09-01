@@ -13,7 +13,10 @@ C6 (the carve model) is checked in node (npm run check:carve, 67
 assertions) but not yet looked at on screen either.
 C7 is the app itself and has not been looked at at all. The renderer is on
 `/`; the old deck.gl map is available at `/?deck` for comparison.
-C8 is next.
+C8's first job — joining C6's carver to the app model — is BUILT, and not
+yet looked at on screen (see C8: what was built, and what to watch for).
+The deletions (the ?deck path, the globeMap branches, split.js's fringe
+machinery) have not started; they gate on the C7/C8 decision points.
 
 Problem
 -------
@@ -873,12 +876,63 @@ C7. Interaction and shell                                     [BUILT, UNSEEN]
       rebuildDerived per refresh, producing arrays no renderer reads.
       Harmless, wasteful, and C8's to delete.
 
-C8. Cutover
+C8. Cutover                                       [JOIN BUILT, deletions not]
   Depends on: everything.
   First, and not a deletion: join C6's carver to the app model, which is the
   one thing C7 held back — and re-own the static line sides first (see the
   end of C6). Then the ?deck escape hatch goes, and with it all 22 branches
   on `globeMap` in main.js.
+
+  The join is built. What it settled, and what to look at:
+
+    - the model reconcile is one function, syncGlobeCarves in main.js,
+      driven wholesale from carver.pieces() after every carve, recut,
+      rejoin and reset — the carver's own derive-not-patch rule, so the two
+      can't drift. New pieces inherit the state of the piece they were cut
+      from by their tree ids (a recut's leaves extend the divided leaf's id
+      by one letter); the parent's original state is captured at first
+      carve, so give-back and Discard still work. The bridge on the
+      renderer side is map.js's carveApi: carver + unit pool + dynamic
+      buffers + the line-side patching, one sync() call.
+    - the static line sides are re-owned by midpoint probe, not by a left/
+      right geometric offset: the cut tree partitions the whole plane, so a
+      point ON the county boundary already answers "which side of each cut"
+      except for the one segment a cut actually crosses — which has to pick
+      a side anyway. Segment endpoints are read back from the GPU once per
+      county (getBufferSubData, beside an 18 ms cut); the two uint16 side
+      arrays are kept on the CPU (1.8 MB) with a pristine copy for restore.
+      The both-sides-equal nation-edge marker moves to one piece, so
+      skipEqual still hides it.
+    - the knife kept the SVG overlay line and all its gestures (click-to-
+      draw, Enter, Escape, right-click undo): the design-space stroke is
+      unprojected to lon/lat at cut time (map.js unprojectDesign), with
+      long chords subdivided first. The "follow tract lines" checkbox in
+      the carve banner asks for keepTractsIntact; it is hidden on ?deck,
+      which only ever does whole tracts.
+    - presets' partial counties and the GeoJSON import both go through C6's
+      own file format: an entry {fips, tracts} replays as a tract cut, and
+      claiming is a second applyEntry pass after the sync (every cut then
+      stands, so it just walks the tree). A piece mostly outside the named
+      tracts is not claimed, which is what keeps a grazing boundary from
+      claiming a whole county when its cut collapses.
+    - Copy JSON exports carver.serialize's entries, so a line-cut piece
+      writes its cuts and side; pure tract pieces keep the legacy
+      {fips, tracts} shape presets read.
+    - labels: a carved county's ground is credited to its largest piece's
+      state (the spin preview's rule). AK/HI counties stay whole on the
+      globe — the tract loader refuses them and the knife says so. A unit
+      with no tracts (a Canadian division, a Mexican state, a country)
+      carves as ONE tract covering the whole of it ({ whole: true } from
+      the tract loader): the synthetic tract shares the unit's compiled
+      triangles, so its numbers split by land share exactly, and the
+      tooltip says so. The deck path keeps its US-only carve index. Known
+      cosmetic gap: a carved seam county loses its apron sliver (apron
+      quads carry the parent's unit id, which hiding the parent hides).
+
+  Not yet looked at on screen, on top of C6's own list (divider width, band
+  on piece boundaries, seams between pieces): whether the re-owned border
+  reads right where a cut meets the county line, and whether the knife's
+  SVG line lands on the ground the cut ends up on.
   Delete: bakeMain, projectParts/projectLines/projectRuns for the main
   region, the spin preview and coarsen, MAP_BOUNDS recompute, all
   MaskExtension usage, edgeBandPaths and bandMaskPaths, the antimeridian and

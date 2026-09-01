@@ -52,6 +52,19 @@ export async function loadGeometry(gl, { manifestUrl, signal } = {}) {
     B.unitIndexRange.count * 2
   );
 
+  // The unit ids on the two sides of every line instance, kept on the CPU for
+  // C8: carving retires a county, and every compiled segment that names it —
+  // its county arcs, its stretch of coast, its side of a border seam — has to
+  // be re-owned to the piece that now holds that ground, then restored when
+  // the county is rejoined. The renderer patches the GPU copy from these; the
+  // pair costs ~1.8 MB against the buffer's 27.
+  const lineLeft = new Uint16Array(
+    raw.slice(B.lineLeft.byteOffset, B.lineLeft.byteOffset + B.lineLeft.count * 2)
+  );
+  const lineRight = new Uint16Array(
+    raw.slice(B.lineRight.byteOffset, B.lineRight.byteOffset + B.lineRight.count * 2)
+  );
+
   // The county fills, copied out so the 20 MB source can be released. `slice`
   // rather than a view for exactly that reason, and it also lands both arrays at
   // offset zero, which is what their element alignment wants.
@@ -68,6 +81,8 @@ export async function loadGeometry(gl, { manifestUrl, signal } = {}) {
     unitCount: B.unitVertexRange.count,
     unitVertexRange,
     unitIndexRange,
+    lineLeft,
+    lineRight,
     countyPositions,
     countyIndices,
     countyFirstVertex: cg.firstVertex,

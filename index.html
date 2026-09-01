@@ -28,12 +28,11 @@
         </div>
         <button id="new-state" class="btn btn-primary">New state</button>
         <button id="carve" class="btn" aria-pressed="false" title="Draw a line across a county to split it along its census tracts">Carve</button>
-        <button id="reset" class="btn">Reset</button>
+        <button id="reset" class="btn">Reset states</button>
       </header>
 
       <main>
-        <div id="map-col">
-          <div id="map-wrap">
+        <div id="map-wrap">
             <canvas id="map-canvas"></canvas>
             <!-- The hover tint draws on its own canvas so a mouse move
                  repaints one county instead of the map's whole layer stack.
@@ -95,6 +94,11 @@
             <div id="carve-banner" hidden>
               <b>Carving</b>
               <span class="hint">drag a line in one side of a county and out the other · or click corner by corner, double-click or Enter to finish</span>
+              <!-- The globe cuts along the drawn line itself, splitting tracts that
+                   straddle it; this asks for the old whole-tract behavior. The deck
+                   fallback ONLY does whole tracts, so the choice is hidden there. -->
+              <label class="hint" id="carve-intact-wrap" hidden><input type="checkbox" id="carve-intact" /> follow tract lines</label>
+              <button id="carve-undo" class="btn btn-small" title="Remove the last placed corner (right-click does the same)">Undo point</button>
               <button id="carve-done" class="btn btn-small">Done</button>
             </div>
             <!-- Transient notices (no tract data here, county rejoined, …) -->
@@ -107,6 +111,17 @@
             <div id="tooltip" hidden></div>
           </div>
 
+        <!-- The state panel and the sidebar share this wrapper. On desktop it
+             is display: contents — the two lay out as grid items of <main>,
+             the panel as a horizontal bar under the map and the sidebar as a
+             full-height column beside both. On a phone the wrapper becomes a
+             bottom tray (Zillow-style): a fixed sheet with a grab handle that
+             peeks above the bottom edge and pulls up over the map. -->
+        <div id="tray">
+          <button id="tray-handle" type="button" aria-expanded="false">
+            <i class="grabber"></i><span id="tray-peek">State details &amp; rankings</span>
+          </button>
+          <div id="tray-content">
           <!-- Selected-state panel: a horizontal bar under the map, abutting
                the sidebar, so the map viewport stays landscape like the
                country it shows. -->
@@ -155,14 +170,13 @@
                 <div class="stat"><span class="stat-label">Electoral votes</span><b id="v-ev"></b><span id="d-ev" class="stat-dots"></span><span id="r-ev" class="rank-chip"></span></div>
               </div>
               <div id="race-wrap">
-                <div id="race-bar"></div>
+                <div id="race-grid"></div>
                 <div id="race-legend"></div>
               </div>
             </section>
           </div>
-        </div>
 
-        <aside id="sidebar">
+          <aside id="sidebar">
           <section id="elections" class="card">
             <h2 class="mini-head">If the 2024 vote elected the president</h2>
             <div class="e-row">
@@ -194,13 +208,16 @@
                 <option value="blk">% Black</option>
                 <option value="hsp">% Hispanic</option>
                 <option value="asn">% Asian</option>
+                <option value="nat">% Native</option>
               </select>
             </div>
             <ol id="rank-list"></ol>
           </section>
 
           <footer id="sources"></footer>
-        </aside>
+          </aside>
+          </div>
+        </div>
       </main>
     </div>
     <script type="module" src="/src/main.js"></script>

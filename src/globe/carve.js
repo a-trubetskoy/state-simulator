@@ -339,11 +339,22 @@ export function createCarver({ units, unitIndex, unitTris, countyRows, fetchTrac
 
   // ------------------------------------------------------------ preparation
 
+  // A unit with no tract file of its own — a Canadian division, a Mexican
+  // state, a Caribbean country — carves as ONE tract covering the whole of it,
+  // asked for by `{ whole: true }` from fetchTracts. The synthetic tract's
+  // triangles ARE the unit's compiled triangles, so a piece's weight is its
+  // share of the unit's area to the bit, and everything downstream — the
+  // apportionment, the export, the reload — runs unchanged on a one-entry
+  // weights map. What that means for the numbers is the caller's decision to
+  // make: with nothing finer than the unit published, land share is the only
+  // split there is. (Medians and life expectancy pass through whole either
+  // way, since a median does not divide.)
   async function prepare(unit) {
     if (carves.has(unit)) return carves.get(unit);
     const u = units[unit];
     const payload = await fetchTracts(u.id);
     if (!payload) return null;
+    const whole = payload.whole === true;
 
     const anchor = u.polygons[0][0][0][0];
     const wrap = inFrame(anchor);
@@ -352,6 +363,7 @@ export function createCarver({ units, unitIndex, unitTris, countyRows, fetchTrac
     const tris = unitTris(unit).map((t) => t.map(([x, y]) => [wrap(x), y]));
     const outline = u.polygons.flatMap((p) => framed(p[0]));
     const bounds = bboxOf([...outline, ...tris.flat()]);
+    const area = areaOf(tris);
 
     const carve = {
       unit,
@@ -360,17 +372,49 @@ export function createCarver({ units, unitIndex, unitTris, countyRows, fetchTrac
       anchor,
       wrap,
       tris,
-      area: areaOf(tris),
+      area,
       bounds,
-      payload,
-      shapes: tractShapes(payload, wrap),
-      arcLines: arcUsers(payload.topo, wrap),
+      whole,
+      // The synthetic tract row carries only what a single tract can inform:
+      // with one tract, every field's share IS the land share, so population
+      // stands in for all of them, and the median is scaled 1:1 through.
+      payload: whole
+        ? { rows: { [u.id]: { pop: countyRows[u.id]?.pop || 0, mhi: countyRows[u.id]?.mhi ?? null } } }
+        : payload,
+      shapes: whole ? [wholeShape(u, framed, tris, area, bounds)] : tractShapes(payload, wrap),
+      arcLines: whole ? [] : arcUsers(payload.topo, wrap),
       root: null,
       pieces: [],
       dividers: [],
     };
     carves.set(unit, carve);
     return carve;
+  }
+
+  // The whole unit as one tract shape, wearing exactly the fields tractShapes
+  // gives a real one — except that its triangles are the unit's own compiled
+  // fill triangles, so cutting them for weights reproduces the piece partition
+  // itself and the shares agree with the drawn pieces exactly.
+  function wholeShape(u, framed, tris, area, bounds) {
+    let cx = 0;
+    let cy = 0;
+    let w = 0;
+    for (const t of tris) {
+      const a = triArea(t);
+      cx += ((t[0][0] + t[1][0] + t[2][0]) / 3) * a;
+      cy += ((t[0][1] + t[1][1] + t[2][1]) / 3) * a;
+      w += a;
+    }
+    const polys = u.polygons.map((rings) => rings.map(framed));
+    return {
+      id: u.id,
+      rings: polys[0] ?? [],
+      polys,
+      tris,
+      area,
+      bbox: bounds,
+      centroid: w ? [cx / w, cy / w] : [0, 0],
+    };
   }
 
   // --------------------------------------------------------------- rebuilding
@@ -484,15 +528,49 @@ export function createCarver({ units, unitIndex, unitTris, countyRows, fetchTrac
 
   // ------------------------------------------------------------ applying a cut
 
+  // Which pieces a line cut is allowed to divide. The rule is candidates' own,
+  // applied piece by piece: a stroke has to pass fully THROUGH a piece to slice
+  // it, so a piece the stroke never enters stays whole even where the cut's
+  // extended ends happen to cross it, and a piece holding a stroke endpoint is
+  // where the knife stopped, not something it cut. Loops are exempt exactly as
+  // they are in candidates. Tract cuts are not gated at all — their record is
+  // the tract set alone, so a replay could not rebuild the gate — and neither
+  // is the first cut into a whole county, where candidates has already ruled.
+  // Null means "divide anything". The gate is derived from the cut's own line,
+  // which is also what gets written to a file, so replaying an export passes
+  // through this same judgement and reproduces the same pieces.
+  function pieceGate(carve, cut) {
+    if (!carve.root || cut.kind !== "line" || isLoop(cut.line)) return null;
+    const step = 0.01; // the sampling step candidates uses, for the same reason
+    const points = cut.line; // already in the county's frame, like the leaves
+    const leafOf = ([x, y]) => (unitIndex.at(x, y) === carve.unit ? leafAt(carve.root, x, y) : null);
+    const touched = new Set();
+    for (let i = 0; i < points.length - 1; i++) {
+      const [x1, y1] = points[i];
+      const [x2, y2] = points[i + 1];
+      const n = Math.max(1, Math.ceil(Math.hypot(x2 - x1, y2 - y1) / step));
+      for (let j = 0; j < n; j++) {
+        const leaf = leafOf([x1 + ((x2 - x1) * j) / n, y1 + ((y2 - y1) * j) / n]);
+        if (leaf) touched.add(leaf);
+      }
+    }
+    for (const p of [points[0], points.at(-1)]) touched.delete(leafOf(p));
+    return (leaf) => touched.has(leaf);
+  }
+
   // Refine the partition by one cut. Every leaf the cut divides splits in two;
-  // leaves wholly on one side keep their id, their colour and their state. A
-  // leaf that comes out under the graze threshold was never really divided, so
-  // its node collapses back to whichever half survived.
+  // leaves wholly on one side, and leaves the gate rules out, keep their id,
+  // their colour and their state. A leaf that comes out under the graze
+  // threshold was never really divided, so its node collapses back to whichever
+  // half survived.
   function applyCut(carve, cut) {
     const before = carve.root;
+    const may = pieceGate(carve, cut);
     const grow = (node) =>
       isLeaf(node)
-        ? { cut, in: mkLeaf(node.id + "i", node), out: mkLeaf(node.id + "o", node) }
+        ? may && !may(node)
+          ? node
+          : { cut, in: mkLeaf(node.id + "i", node), out: mkLeaf(node.id + "o", node) }
         : { cut: node.cut, in: grow(node.in), out: grow(node.out) };
     const mkLeaf = (id, from) => ({ id, state: from?.state, tris: [], weights: new Map() });
 
@@ -553,8 +631,13 @@ export function createCarver({ units, unitIndex, unitTris, countyRows, fetchTrac
    * sliced it, so the units holding the two endpoints are dropped — unless the
    * stroke is a loop, where both ends sit inside the county on purpose and
    * dropping them would throw away the only county the cut applies to.
+   *
+   * A county already carved is the other exception, when the caller asks for
+   * it: its unit of account is the piece, not the county, so a stroke ending
+   * inside it only says the PIECE holding that endpoint was not sliced. The
+   * county stays a candidate and pieceGate judges each piece by this same rule.
    */
-  function candidates(points) {
+  function candidates(points, pieceAware = false) {
     // A tenth of a degree is 1.1 km, finer than the smallest unit on the map —
     // Falls Church, Virginia, is about two km across — so nothing can slip
     // between two samples. A fixed step rather than one scaled to the stroke:
@@ -573,8 +656,10 @@ export function createCarver({ units, unitIndex, unitTris, countyRows, fetchTrac
       for (let j = 0; j < n; j++) visit([x1 + ((x2 - x1) * j) / n, y1 + ((y2 - y1) * j) / n]);
     }
     if (!isLoop(points)) {
-      touched.delete(visit(points[0]));
-      touched.delete(visit(points.at(-1)));
+      for (const p of [points[0], points.at(-1)]) {
+        const u = visit(p);
+        if (u >= 0 && !(pieceAware && carves.get(u)?.root)) touched.delete(u);
+      }
     }
     return [...touched];
   }
@@ -616,7 +701,9 @@ export function createCarver({ units, unitIndex, unitTris, countyRows, fetchTrac
     const carved = [];
     const noData = [];
     const full = [];
-    for (const unit of candidates(clean)) {
+    // A tract cut keeps the county-level rule: pieceGate cannot gate it, so
+    // letting an ending-inside stroke through would cut what was not drawn.
+    for (const unit of candidates(clean, !keepTractsIntact)) {
       const c = await prepare(unit);
       if (!c) {
         noData.push(units[unit].name);
@@ -632,9 +719,13 @@ export function createCarver({ units, unitIndex, unitTris, countyRows, fetchTrac
         [c.bounds.x1, c.bounds.y1],
         ...framed,
       ]);
-      const cut = keepTractsIntact
-        ? tractCut(c.shapes, c.arcLines, tractsInside(c, framed, bounds), bounds)
-        : lineCut(framed, bounds);
+      // "Keep tracts intact" means nothing on a unit whose only tract is
+      // itself — there is no tract line to follow but its own boundary — so
+      // the drawn line cuts either way.
+      const cut =
+        keepTractsIntact && !c.whole
+          ? tractCut(c.shapes, c.arcLines, tractsInside(c, framed, bounds), bounds)
+          : lineCut(framed, bounds);
       if (!cut || !cut.curves.length) continue;
       if (applyCut(c, cut)) carved.push(c.name);
       else if (!c.root) carves.delete(unit);

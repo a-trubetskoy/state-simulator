@@ -11,6 +11,7 @@
 //   a serialized piece reloads as the same geometry
 //   keeping tracts whole puts every tract in exactly one piece
 //   a legacy { fips, tracts } preset entry still means what it meant
+//   a unit with no tracts carves as ONE tract, its numbers split by land share
 //
 // Read from disk rather than fetched, and otherwise the same modules the browser
 // runs.
@@ -67,19 +68,27 @@ const topo = read("na-counties-topo.json");
 const units = feature(topo, topo.objects.counties).features.map((f) => ({
   id: f.id,
   name: f.properties?.name ?? f.id,
+  st: f.properties?.st,
   polygons: f.geometry.type === "Polygon" ? [f.geometry.coordinates] : f.geometry.coordinates,
 }));
 if (units.some((u, i) => u.id !== manifest.units[i])) {
   throw new Error("the topojson and the compiled manifest disagree on unit order");
 }
 const unitIndex = createUnitIndex(units);
-const countyRows = read("na-county-data.json").counties;
+const countyData = read("na-county-data.json");
+const countyRows = countyData.counties;
 
+// The same rule the app applies: no tract file plus a home state outside the
+// union means the unit carves as one tract covering the whole of it.
+const foreignStates = new Set(countyData.foreign ?? []);
+const homeStateOf = new Map(units.map((u) => [u.id, u.st]));
 const tractCache = new Map();
 const fetchTracts = async (fips) => {
   if (!tractCache.has(fips)) {
     const p = path.join(DATA, "tracts", `${fips}.json`);
-    tractCache.set(fips, fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, "utf8")) : null);
+    let payload = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, "utf8")) : null;
+    if (!payload && foreignStates.has(homeStateOf.get(fips))) payload = { whole: true };
+    tractCache.set(fips, payload);
   }
   return tractCache.get(fips);
 };
@@ -276,6 +285,58 @@ console.log("\ncutting twice");
 
   // A second cut must not disturb the piece it did not touch.
   ok("ids record the path", c.pieces.every((p) => p.id.startsWith(`${SUBJECT}:`)), c.pieces.map((p) => p.id).join(" "));
+}
+
+console.log("\ncutting one piece on its own");
+{
+  // Once a county is carved, "the line must pass fully through" is judged
+  // against the PIECE, not the original county: a stroke that crosses one half
+  // and stops in the other splits only the half it crossed.
+  const carver = newCarver();
+  carverOf = carver;
+  await carver.carve(strokeAcross(SUBJECT, 0.5));
+  const c = carver.carves.get(unitOf(SUBJECT));
+  const low = [...c.pieces].sort((a, b) => a.center[1] - b.center[1])[0];
+  const before = { id: low.id, pop: low.row.pop, area: low.area };
+
+  // Straight down from above the county, through the entire upper piece,
+  // stopping at the lower piece's own centre.
+  const res = await carver.carve([
+    [low.center[0], c.bounds.y1 + (c.bounds.y1 - c.bounds.y0)],
+    [low.center[0], low.center[1]],
+  ]);
+  ok("the cut took", res.carved.length === 1, res.carved.join(", ") || JSON.stringify(res));
+  ok("the top split, the bottom stayed whole", c.pieces.length === 3, c.pieces.map((p) => p.id).join(" "));
+  ok("still tiles the county", tiles(c).pass, tiles(c).note);
+  const kept = pieceById(c, before.id);
+  ok("the piece holding the stroke's end is untouched",
+    kept != null && kept.row.pop === before.pop && near(kept.area, before.area, before.area * 1e-12),
+    kept ? `pop ${kept.row.pop} vs ${before.pop}` : "the piece is gone");
+  ok("population still sums",
+    c.pieces.reduce((s, p) => s + p.row.pop, 0) === countyRows[SUBJECT].pop);
+
+  // A scratch wholly inside one piece passes fully through nothing, so it
+  // divides nothing — the piece-level version of ending inside a county.
+  const reach = (c.bounds.y1 - c.bounds.y0) * 0.05;
+  const res2 = await carver.carve([
+    [low.center[0] - reach, low.center[1] - reach],
+    [low.center[0] + reach, low.center[1] + reach],
+  ]);
+  ok("a scratch inside one piece carves nothing",
+    res2.carved.length === 0 && c.pieces.length === 3, JSON.stringify(res2.carved));
+
+  // A piece cut this way writes down and reads back as itself: the replay
+  // judges pieces by the recorded line the same way, so the bottom stays whole
+  // there too.
+  const sub = c.pieces.find((p) => p.id !== before.id);
+  const entry = carver.serialize(sub.id);
+  const fresh = newCarver();
+  const got = await fresh.apply(entry);
+  const after = fresh.carves.get(unitOf(SUBJECT));
+  ok("it reloads as one piece", got.length === 1 && got[0] === sub.id, got.join(" "));
+  ok("with the same partition", after?.pieces.length === 3, after?.pieces.map((p) => p.id).join(" "));
+  ok("and the same population", pieceById(after, got[0])?.row.pop === sub.row.pop,
+    `${pieceById(after, got[0])?.row.pop} vs ${sub.row.pop}`);
 }
 
 console.log("\na cut that only grazes");
@@ -518,6 +579,73 @@ console.log("\nthe lines between pieces");
   const width = c.bounds.x1 - c.bounds.x0;
   ok("they add up to about one crossing", len > width * 0.5 && len < width * 2,
     `${len.toFixed(3)}° of divider across a ${width.toFixed(3)}° county`);
+}
+
+console.log("\na unit with no tracts carves as one");
+{
+  // The whole-unit fallback: a Canadian division cut along a drawn line, with
+  // the unit itself standing in as its only tract, so everything splits by
+  // land share — there is nothing finer published to split by.
+  const DIVISION = "CA-4806"; // Calgary's division
+  const carver = newCarver();
+  const res = await carver.carve(strokeAcross(DIVISION));
+  const c = carver.carves.get(unitOf(DIVISION));
+  ok("the cut took", res.carved.length === 1 && c != null, res.carved.join(", ") || JSON.stringify(res));
+  ok("two pieces", c.pieces.length === 2, c.pieces.map((p) => p.id).join(" "));
+  ok("the pieces tile the division", tiles(c).pass, tiles(c).note);
+
+  // One synthetic tract, keyed by the unit itself — and because it shares the
+  // unit's own triangles, its weights are the land shares exactly.
+  ok("each piece weighs one tract: the unit",
+    c.pieces.every((p) => p.weights.size === 1 && p.weights.has(DIVISION)));
+  const worst = Math.max(
+    ...c.pieces.map((p) => Math.abs((p.weights.get(DIVISION) ?? 0) - p.area / c.area))
+  );
+  ok("weights are the land shares exactly", worst < 1e-12, `worst ${worst.toExponential(2)}`);
+
+  const row = countyRows[DIVISION];
+  ok("population is conserved", c.pieces.reduce((s, p) => s + p.row.pop, 0) === row.pop);
+  ok("gdp is conserved", c.pieces.reduce((s, p) => s + p.row.gdp, 0) === row.gdp);
+  ok("population went by land share",
+    c.pieces.every((p) => Math.abs(p.row.pop - row.pop * (p.area / c.area)) <= 2),
+    c.pieces.map((p) => ((100 * p.row.pop) / row.pop).toFixed(1) + "%").join(" / "));
+  ok("the median passes through whole", c.pieces.every((p) => p.row.mhi === row.mhi));
+  ok("so does life expectancy", c.pieces.every((p) => p.row.life === row.life));
+
+  // "Keep tracts intact" has no tract line to follow but the unit's own
+  // boundary, so the drawn line cuts either way.
+  const intact = newCarver();
+  const res2 = await intact.carve(strokeAcross(DIVISION), { keepTractsIntact: true });
+  ok("keeping tracts whole still cuts", res2.carved.length === 1, res2.carved.join(", "));
+
+  // The export writes the unit plus its cuts, and reads back as itself.
+  const entry = carver.serialize(c.pieces[0].id);
+  ok("a piece writes down as the unit plus its cuts",
+    entry.fips === DIVISION &&
+      entry.tracts.length === 1 &&
+      entry.tracts[0] === DIVISION &&
+      entry.cuts?.length === 1);
+  const fresh = newCarver();
+  const got = await fresh.apply(entry);
+  ok("and reads back as itself",
+    got.length === 1 &&
+      pieceById(fresh.carves.get(unitOf(DIVISION)), got[0]).row.pop === c.pieces[0].row.pop,
+    got.join(" "));
+
+  // A single-unit country goes through the same door — and so does everything
+  // else the stroke happens to cross: a line across Cuba's bounding box also
+  // slices clean through Quintana Roo and two island countries, and every one
+  // of them now carves rather than begging off.
+  const cuba = newCarver();
+  const res3 = await cuba.carve(strokeAcross("CUB"));
+  const cc = cuba.carves.get(unitOf("CUB"));
+  ok("a country carves too", res3.carved.includes("Cuba") && cc?.pieces.length === 2,
+    res3.carved.join(", ") || JSON.stringify(res3));
+  ok("and its pieces tile it", cc ? tiles(cc).pass : false, cc ? tiles(cc).note : "");
+  ok("so does everything else the stroke crossed",
+    res3.carved.length > 1 &&
+      [...cuba.carves.values()].every((k) => tiles(k).pass && k.pieces.length === 2),
+    res3.carved.join(", "));
 }
 
 console.log("\nrejoining");

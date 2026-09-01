@@ -22,12 +22,18 @@ body {
   color: var(--text);
   font-size: 12px;
   line-height: 1.4;
+  /* Tapping a button on touch flashes a grey box around it otherwise. */
+  -webkit-tap-highlight-color: transparent;
 }
 
 #app {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  /* Mobile browsers: 100vh includes the collapsed URL bar, so the page would
+     sit taller than the visible screen and the sidebar's bottom would hide
+     behind browser chrome. dvh tracks the real visible height. */
+  height: 100dvh;
 }
 
 /* ------------------------------------------------------------- header */
@@ -183,33 +189,53 @@ h1 {
 
 /* ---------------------------------------------------------------- map */
 
+/* Map top-left, state panel beneath it, sidebar a full-height column beside
+   both. A grid rather than nested flex columns because the panel and the
+   sidebar share a wrapper (#tray): on desktop the wrapper dissolves
+   (display: contents) and its children place themselves on this grid; on a
+   phone the same wrapper becomes a bottom sheet (see narrow screens). */
 main {
   flex: 1;
-  display: flex;
   min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 330px;
+  grid-template-rows: minmax(0, 1fr) auto;
 }
 
-/* Map on top, state panel beneath; the sidebar runs the full height beside
-   both. */
-#map-col {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
+#tray,
+#tray-content {
+  display: contents;
+}
+
+/* The sheet's grab handle exists only on the phone layout. */
+#tray-handle {
+  display: none;
 }
 
 #map-wrap {
-  flex: 1;
+  grid-area: 1 / 1;
   position: relative;
   min-height: 0;
   /* Absolutely positioned children (tooltip, banner) must never extend the
      document and summon a scrollbar — that shifts the whole layout. */
   overflow: hidden;
+  /* A long press on touch would otherwise raise iOS's selection magnifier
+     over the map instead of continuing the spin/paint/knife gesture. */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 
 #map-canvas {
   position: absolute;
   inset: 0;
+  /* A canvas is a replaced element, so inset: 0 alone does NOT stretch it —
+     with width: auto it lays out at its backing-store size (css px × device
+     pixel ratio), which misplaces the drawn map on any screen where the ratio
+     isn't 1. These pin the element to the box; the backing store is sized in
+     device pixels by globe/map.js. */
+  width: 100%;
+  height: 100%;
   display: block;
 }
 
@@ -244,6 +270,11 @@ main {
   height: 100%;
   display: block;
   cursor: grab;
+  /* Touch gestures on the map belong to the map — one finger spins, paints
+     or cuts, two pinch-zoom (see the touch section in main.js). Without this
+     the browser claims them for page scrolling and double-tap zoom. The rest
+     of the page keeps native scrolling. */
+  touch-action: none;
 }
 
 #map:active {
@@ -545,11 +576,12 @@ main {
 /* ------------------------------------------------------------ sidebar */
 
 #sidebar {
-  width: 330px;
+  grid-area: 1 / 2 / 3 / 3;
   border-left: 1px solid var(--line-strong);
   background: #fff;
   display: flex;
   flex-direction: column;
+  min-height: 0;
   overflow: auto;
 }
 
@@ -627,6 +659,7 @@ button.dot:disabled {
    min-height budgets for the tallest identity column: a foreign unit's third
    action button wraps .panel-actions onto a second row. */
 #state-panel {
+  grid-area: 2 / 1;
   border-top: 1px solid var(--line-strong);
   background: #fff;
   display: grid;
@@ -801,8 +834,8 @@ button.dot:disabled {
   flex: none;
   width: 260px;
   display: flex;
-  flex-direction: column;
-  justify-content: center;
+  align-items: center;
+  gap: 14px;
   border-left: 1px solid var(--line);
   padding-left: 16px;
 }
@@ -814,32 +847,36 @@ button.dot:disabled {
   visibility: hidden;
 }
 
-#race-bar {
-  display: flex;
-  height: 12px;
-  border: 1px solid var(--line);
-  overflow: hidden;
+/* 100 dots, one per person in a hundred, ten to a row. */
+#race-grid {
+  flex: none;
+  display: grid;
+  grid-template-columns: repeat(10, 8px);
+  gap: 2px;
 }
 
-#race-bar i {
-  display: block;
-  height: 100%;
+#race-grid i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
 }
 
 #race-legend {
+  min-width: 0;
   display: flex;
-  flex-wrap: wrap;
-  gap: 2px 10px;
-  margin-top: 4px;
+  flex-direction: column;
+  gap: 3px;
   color: var(--muted);
   font-size: 11px;
+  white-space: nowrap;
 }
 
 #race-legend i {
   display: inline-block;
   width: 8px;
   height: 8px;
-  margin-right: 3px;
+  margin-right: 5px;
+  border-radius: 50%;
 }
 
 /* elections card */
@@ -1088,4 +1125,273 @@ button.dot:disabled {
   font-size: 10px;
   padding: 6px 10px;
   line-height: 1.5;
+}
+
+/* ---------------------------------------------------------- mid widths */
+
+/* Below ~1240px the sidebar still fits beside the map, but the state panel's
+   single row no longer does: after the fixed identity (210px) and race
+   (260px) columns the stats grid drops under two columns and stacks all nine
+   stats vertically. Re-stack the panel instead — identity row on top, stats
+   grid full width, race block last — the same arrangement the phone layout
+   uses. The panel's height now changes with the selection (the keep-footprint
+   overlay would leave a tall blank block under the map when nothing is
+   selected), so the map resizes on select/deselect at these widths. */
+@media (max-width: 1240px) {
+  #state-panel section {
+    min-height: 0;
+    flex-wrap: wrap;
+  }
+
+  #state-panel section[hidden] {
+    display: none;
+    visibility: visible;
+  }
+
+  .panel-id {
+    width: 100%;
+  }
+
+  .panel-stats {
+    flex: 1 1 100%;
+    border-left: none;
+    padding-left: 0;
+  }
+
+  #race-wrap {
+    width: auto;
+    border-left: none;
+    padding-left: 0;
+  }
+
+  #race-wrap[hidden] {
+    display: none;
+  }
+}
+
+/* ------------------------------------------------------- narrow screens */
+
+/* Phones: the map fills the screen under the header, and the state panel and
+   rankings live in a bottom sheet (#tray) that peeks above the bottom edge
+   and pulls up over the map — the Zillow arrangement. The page itself never
+   scrolls; the sheet's content does. main.js reads the same 800px cutoff to
+   start the AK/HI inset boxes closed and to scale them down. */
+@media (max-width: 800px) {
+  :root {
+    /* The peek is the grab-handle bar plus a cut-off sliver of the sheet's
+       own content — the sliver is what hints that the sheet pulls up. */
+    --tray-peek: 78px;
+    --tray-handle: 44px;
+  }
+
+  /* The padding keeps the map viewport clear of the sheet's collapsed peek
+     bar, so no map furniture ever hides behind it. The sheet itself is
+     positioned inside <main> (not the viewport): open it covers exactly the
+     map area — everything below the header, whose wrapped height varies —
+     and closed, its off-screen part is clipped here instead of extending
+     the page. */
+  main {
+    display: flex;
+    flex-direction: column;
+    padding-bottom: var(--tray-peek);
+    position: relative;
+    overflow: hidden;
+  }
+
+  #map-wrap {
+    flex: 1;
+    min-height: 0;
+  }
+
+  .tagline {
+    display: none;
+  }
+
+  .brand {
+    min-width: 0;
+    flex: none;
+  }
+
+  /* The search drops to its own full-width row (the header already wraps). */
+  .preset-box {
+    flex: 1 1 100%;
+  }
+
+  #preset-search {
+    width: 100%;
+    max-width: none;
+  }
+
+  /* The panel re-stack itself comes from the mid-widths query above; only
+     the tighter padding is phone-specific. */
+  #state-panel section {
+    padding: 8px 10px;
+  }
+
+  /* --------------------------------------------------------- the tray */
+
+  #tray {
+    display: flex;
+    flex-direction: column;
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 100%;
+    background: #fff;
+    border-top: 1px solid var(--line-strong);
+    /* The sheet floats over the map, so it should read as one. */
+    box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.15);
+    z-index: 30;
+    transform: translateY(calc(100% - var(--tray-peek)));
+    transition: transform 0.22s ease-out;
+  }
+
+  #tray.open {
+    transform: translateY(0);
+  }
+
+  /* While a finger drags the sheet its transform is written per move; a
+     transition would make it lag the finger. */
+  #tray.dragging {
+    transition: none;
+  }
+
+  #tray-handle {
+    display: flex;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    height: var(--tray-handle);
+    padding: 0;
+    border: none;
+    background: none;
+    font: inherit;
+    color: var(--text);
+    cursor: pointer;
+    /* The drag on the handle steers the sheet, never the page. */
+    touch-action: none;
+  }
+
+  #tray-handle .grabber {
+    width: 32px;
+    height: 4px;
+    flex: none;
+    border-radius: 2px;
+    background: #c4c4c4;
+  }
+
+  #tray-content {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  /* While the sheet is down, the sliver of content under the handle is a
+     hint, not a scroller: a finger there drags the sheet itself (main.js),
+     so the browser must not claim the gesture for scrolling. */
+  #tray:not(.open) #tray-content {
+    overflow-y: hidden;
+    touch-action: none;
+  }
+
+  /* flex: none over the desktop min-height: 0 — otherwise the sidebar
+     squashes to fit the sheet, the rank list paints past it as visible
+     overflow, and #sources lands mid-list with rows sliding under it. Here
+     the content is one flowing column and #tray-content is the one
+     scroller, so #sources sits below the ranking at the very bottom. */
+  #sidebar {
+    grid-area: auto;
+    border-left: none;
+    border-top: 1px solid var(--line);
+    flex: none;
+    overflow: visible;
+  }
+
+  /* The sheet's content is the one scroller; the rankings list just flows. */
+  #rankings {
+    min-height: 0;
+  }
+
+  #rank-list {
+    overflow: visible;
+  }
+
+  /* The banners can't hang centered at the top: the Atlas/Data toggle sits at
+     top-left 8px and would collide, and the nowrap hint runs past a phone
+     screen. Below the toggle, full width, wrapping. */
+  #paint-banner,
+  #carve-banner {
+    top: 40px;
+    left: 8px;
+    right: 8px;
+    transform: none;
+    white-space: normal;
+    flex-wrap: wrap;
+    row-gap: 4px;
+    justify-content: center;
+  }
+
+  /* The long how-to hints go; span.hint only — the "follow tract lines"
+     checkbox is a label.hint and is a control, not a hint. */
+  #paint-banner span.hint,
+  #carve-banner span.hint {
+    display: none;
+  }
+
+  /* Stays below the relocated banner. */
+  #map-note {
+    top: 76px;
+  }
+
+  /* Clears the Reset view/Alaska/Hawaii row, which the data-view legend
+     otherwise overlaps on a phone-width map. */
+  #map-legend {
+    bottom: 42px;
+  }
+}
+
+/* -------------------------------------------------------- touch pointers */
+
+/* Finger-sized targets where the mouse sizes are too tight, and 16px inputs
+   so iOS doesn't auto-zoom the page when one takes focus. */
+@media (pointer: coarse) {
+  .btn {
+    padding: 8px 12px;
+  }
+
+  .btn-small {
+    padding: 6px 10px;
+    font-size: 12px;
+  }
+
+  #view-toggle button {
+    padding: 8px 12px;
+  }
+
+  #rank-list li {
+    padding: 6px 4px;
+  }
+
+  #rank-stat {
+    padding: 6px;
+  }
+
+  #preset-search,
+  .state-name {
+    font-size: 16px;
+  }
+
+  #color-menu {
+    grid-template-columns: repeat(7, 24px);
+  }
+
+  .swatch {
+    width: 24px;
+    height: 24px;
+  }
 }

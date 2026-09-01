@@ -466,10 +466,34 @@ const worldTopo = readJson("world-land.json");
 
 const counties = feature(countiesTopo, countiesTopo.objects.counties).features;
 const worldLand = feature(worldTopo, worldTopo.objects.land).features;
-const worldLakes = feature(worldTopo, worldTopo.objects.lakes).features;
+// The lake tiers, largest first, and their shorelines. Same contract the river
+// tiers keep: build-world.mjs decides what falls in each and its order is read
+// off the file rather than repeated here, so a tier is never drawn without
+// every larger tier under it. A tier's water and its shore carry the same
+// number, and the renderer fades the pair together.
+const LAKE_TIERS = Object.keys(worldTopo.objects).filter((n) => /^lakes\d+$/.test(n));
+if (!LAKE_TIERS.length) throw new Error("world-land.json carries no lake tiers");
+const worldLakes = LAKE_TIERS.map((name) => ({
+  name,
+  edges: name.replace(/^lakes/, "lakeEdges"),
+  features: feature(worldTopo, worldTopo.objects[name]).features,
+}));
+for (const t of worldLakes) {
+  if (!worldTopo.objects[t.edges]) throw new Error(`${t.name} has no ${t.edges} to go with it`);
+}
 const worldCoast = feature(worldTopo, worldTopo.objects.coast).geometry;
 const worldBorders = feature(worldTopo, worldTopo.objects.borders).geometry;
-const worldLakeEdges = feature(worldTopo, worldTopo.objects.lakeEdges).geometry;
+for (const t of worldLakes) t.edgeGeometry = feature(worldTopo, worldTopo.objects[t.edges]).geometry;
+// The river tiers, coarsest first. build-world.mjs decides what falls in each
+// and its order is the contract: a tier is never drawn without every coarser
+// tier under it, so the names are read in the order they appear there rather
+// than being listed again here.
+const RIVER_TIERS = Object.keys(worldTopo.objects).filter((n) => /^rivers\d+$/.test(n));
+if (!RIVER_TIERS.length) throw new Error("world-land.json carries no river tiers");
+const worldRivers = RIVER_TIERS.map((name) => ({
+  name,
+  geometry: feature(worldTopo, worldTopo.objects[name]).geometry,
+}));
 const lakeFeatures = overlays.lakes.features;
 
 // Unit ids in source order, which is the order the map draws them in: the
@@ -683,10 +707,10 @@ function checkArea(label, got, want) {
   }
   endFill("worldLand", m);
 }
-{
+for (const tier of worldLakes) {
   const m = beginFill();
-  for (const f of worldLakes) addFill(f.geometry, UNIT_NONE, WORLD_CCW);
-  endFill("worldLakes", m);
+  for (const f of tier.features) addFill(f.geometry, UNIT_NONE, WORLD_CCW);
+  endFill(tier.name.replace(/^lakes/, "worldLakes"), m);
 }
 // The map's own lakes split two ways, exactly as the layer stack does: the
 // ones the Census file carves out of the land go under the white backing, the
@@ -807,10 +831,26 @@ const ringsOf = (geometry) =>
   for (const line of ringsOf(worldBorders)) addPolyline(line);
   endLines("worldBorders", first, { unitBoundary: false });
 }
-{
+for (const tier of worldLakes) {
   const first = beginLines();
-  for (const line of ringsOf(worldLakeEdges)) addPolyline(line);
-  endLines("worldLakeEdges", first, { unitBoundary: false });
+  for (const line of ringsOf(tier.edgeGeometry)) addPolyline(line);
+  endLines(tier.edges.replace(/^lakeEdges/, "worldLakeEdges"), first, { unitBoundary: false });
+}
+// The world's rivers, which unlike the three groups above are not scenery:
+// they run over the map's own counties as much as over the land behind it.
+// They sit here all the same, next to the other water lines out of the same
+// source file — buffer order is not draw order, and the renderer puts them
+// where they belong.
+//
+// One group per tier, in tier order, so the renderer can draw the coarse
+// rivers alone at a wide view and add the finer ones as it zooms in. Each is
+// an ordinary line group and nothing downstream needs to know they are a
+// series: a group is a range in the buffer, so drawing three of the four is
+// three draw calls over one contiguous stretch of it.
+for (const tier of worldRivers) {
+  const first = beginLines();
+  for (const line of ringsOf(tier.geometry)) addPolyline(line);
+  endLines(tier.name, first, { unitBoundary: false });
 }
 const addLakeEdges = (name, onland) => {
   const first = beginLines();
@@ -1104,7 +1144,7 @@ const manifest = {
   // every colour and width.
   fillOrder: [
     "worldLand",
-    "worldLakes",
+    ...worldLakes.map((t) => t.name.replace(/^lakes/, "worldLakes")),
     "lakesUnder",
     "nation",
     "aprons",
@@ -1115,7 +1155,8 @@ const manifest = {
     "graticule",
     "worldCoast",
     "worldBorders",
-    "worldLakeEdges",
+    ...worldLakes.map((t) => t.edges.replace(/^lakeEdges/, "worldLakeEdges")),
+    ...RIVER_TIERS,
     "lakeEdgesUnder",
     "coast",
     "lakeshore",

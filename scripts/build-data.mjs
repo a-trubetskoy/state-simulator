@@ -36,7 +36,7 @@
 // boundary file carries millions of vertices, so `npm run data` raises Node's
 // heap; running this script by hand wants the same.
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { unzipSync } from "fflate";
@@ -99,6 +99,19 @@ const URLS = {
   // which is what makes it usable as a nominal growth factor (the survey-based
   // series are published in constant dollars).
   caIncome: "https://www150.statcan.gc.ca/n1/tbl/csv/11100009-eng.zip",
+  // Three-year complete life tables: Canada and every province except PEI.
+  caLifeProv: "https://www150.statcan.gc.ca/n1/tbl/csv/13100114-eng.zip",
+  // Three-year abridged life tables: PEI, Yukon, NWT, Nunavut (StatCan
+  // publishes these four separately from the rest — a small-population
+  // methodology split, not a coverage gap).
+  caLifeTerr: "https://www150.statcan.gc.ca/n1/tbl/csv/13100140-eng.zip",
+  // BC's 89 Local Health Areas, the province's own health-reporting
+  // geography, via the BC Geographic Warehouse's WFS GeoJSON output.
+  bcLha:
+    "https://openmaps.gov.bc.ca/geo/pub/WHSE_ADMIN_BOUNDARIES.BCHA_LOCAL_HEALTH_AREA_SP/ows" +
+    "?service=WFS&version=2.0.0&request=GetFeature" +
+    "&typeName=pub:WHSE_ADMIN_BOUNDARIES.BCHA_LOCAL_HEALTH_AREA_SP" +
+    "&outputFormat=json&srsName=EPSG:4326",
   // The _lakes variants carve major lakes out of the land, matching how the
   // Census county polygons treat the Great Lakes — without this, Ontario's
   // polygon would run through the middle of Lake Superior.
@@ -903,7 +916,7 @@ async function loadNaForeignFeatures() {
 // ------------------------------------------- Canada: census division stats
 
 // The 2021 Census Profile in long form: one row per (division,
-// characteristic), 770k of them. These are the six the map needs.
+// characteristic), 770k of them. These are the ones the map needs.
 const CA_CHAR = {
   pop: 1, // Population, 2021
   earnN: 133, // Number of employment income recipients 15+ (25% sample)
@@ -911,7 +924,69 @@ const CA_CHAR = {
   mhi: 243, // Median total income of household in 2020 ($)
   eduT: 2014, // Total, highest certificate/diploma/degree, aged 25 to 64
   eduB: 2024, // Bachelor's degree or higher, aged 25 to 64
+  // Visible minority (Employment Equity Act categories) and Indigenous
+  // identity, both 25% sample data — see caRace() below for how these map
+  // onto the US-shaped rW/rB/rN/rA/rH buckets.
+  vmTotal: 1683, // Total - Visible minority for the population in private households
+  vmSouthAsian: 1685,
+  vmChinese: 1686,
+  vmBlack: 1687,
+  vmFilipino: 1688,
+  vmArab: 1689,
+  vmLatinAmerican: 1690,
+  vmSoutheastAsian: 1691,
+  vmWestAsian: 1692,
+  vmKorean: 1693,
+  vmJapanese: 1694,
+  vmNotVisMin: 1697, // Not a visible minority
+  indigenous: 1403, // Indigenous identity (single + multiple Indigenous responses)
 };
+
+// Canada asks two separate census questions where the US ASRH data this
+// sits alongside asks one: visible minority (the Employment Equity Act's
+// categories, which explicitly exclude "Aboriginal peoples") and Indigenous
+// identity. Mapped onto the US-shaped rW/rB/rN/rA/rH buckets so a Canadian
+// division plugs into the same race bar and rankings as a US county:
+//
+//   rN  Indigenous identity, taken directly — its own census question, not
+//       a slice of visible minority.
+//   rB  Visible minority: Black, taken directly.
+//   rA  Visible minority: South Asian + Chinese + Filipino + Southeast
+//       Asian + Korean + Japanese.
+//   rH  Visible minority: Latin American — the closest available proxy for
+//       the US's Hispanic-of-any-race question, though it's a different
+//       kind of category there (an ethnicity that crosses race) than here
+//       (one race-like group among several).
+//   rW  Not a visible minority, minus Indigenous identity (StatCan's "not a
+//       visible minority" bucket includes Indigenous respondents, since
+//       Aboriginal identity isn't one of the visible-minority categories),
+//       plus Arab and West Asian — matching current US Census Bureau
+//       practice of classifying Middle Eastern/North African and Central
+//       Asian origins as White rather than Asian.
+//
+// What's left over (visible minority n.i.e., multiple visible minorities)
+// lands in the race bar's "Other" slice, same as the US bar's uncounted NH
+// Pacific Islander/two-or-more-races/some-other-race. Unlike the foreign
+// units' bachPct/mhi, this is a real headcount, not an estimate — just
+// bucketed differently than the categories it sits alongside in the app.
+function caRace(p) {
+  if (p.vmTotal == null) return { rT: 0, rW: 0, rB: 0, rN: 0, rA: 0, rH: 0 };
+  const indig = p.indigenous ?? 0;
+  return {
+    rT: p.vmTotal,
+    rW: Math.max(0, (p.vmNotVisMin ?? 0) - indig) + (p.vmArab ?? 0) + (p.vmWestAsian ?? 0),
+    rB: p.vmBlack ?? 0,
+    rN: indig,
+    rA:
+      (p.vmSouthAsian ?? 0) +
+      (p.vmChinese ?? 0) +
+      (p.vmFilipino ?? 0) +
+      (p.vmSoutheastAsian ?? 0) +
+      (p.vmKorean ?? 0) +
+      (p.vmJapanese ?? 0),
+    rH: p.vmLatinAmerican ?? 0,
+  };
+}
 
 const CA_PROFILE_CACHE = "ca-census-profile-cd.zip";
 
@@ -1090,6 +1165,199 @@ async function loadCaIncomeGrowth() {
   return growth;
 }
 
+// Life expectancy at birth, both sexes, per province/territory — the "for
+// now" fallback every Canadian division gets unless a finer source overrides
+// it below. Two StatCan tables cover disjoint geographies: 13-10-0114 (three-
+// year complete life tables) covers Canada and every province but PEI;
+// 13-10-0140 (three-year abridged life tables) covers exactly PEI and the
+// three territories, a small-population methodology split rather than a
+// coverage gap. Every province reads the same period — the newest one either
+// table actually publishes a value for — rather than each hunting for its
+// own latest, so a suppressed geography goes without a value instead of a
+// stale one: Yukon's ex has been suppressed since the 2015/2017 window, so
+// it carries none rather than a decade-old figure sitting next to everyone
+// else's current one.
+async function loadCaProvinceLifeExpectancy() {
+  const byName = new Map([...CA_PROVINCES.values()].map(([id, name]) => [name, id]));
+  byName.set("Québec", "CA-QC");
+
+  const collect = (rows, ageKey) => {
+    const out = [];
+    for (const r of rows) {
+      if (r[ageKey] !== "0 years" || r.Sex !== "Both sexes") continue;
+      if (!r.Element.startsWith("Life expectancy")) continue;
+      if (r.VALUE === "") continue;
+      const value = +r.VALUE;
+      if (!Number.isFinite(value)) continue;
+      out.push({ geo: r.GEO, period: r.REF_DATE, value });
+    }
+    return out;
+  };
+
+  const readTable = async (url, cacheName) => {
+    const zip = unzipSync(new Uint8Array(await download(url, cacheName)));
+    const csvName = Object.keys(zip).find((n) => /^\d+\.csv$/i.test(n));
+    return csvParse(Buffer.from(zip[csvName]).toString("utf8").replace(/^﻿/, ""));
+  };
+
+  const readings = [
+    ...collect(await readTable(URLS.caLifeProv, "ca-life-provinces.zip"), "Age group"),
+    ...collect(await readTable(URLS.caLifeTerr, "ca-life-territories.zip"), "Age interval"),
+  ];
+  const period = readings.reduce((a, r) => (r.period > a ? r.period : a), "");
+  const byGeo = new Map(readings.filter((r) => r.period === period).map((r) => [r.geo, r.value]));
+
+  const life = new Map(); // province id -> years
+  for (const [geo, id] of byName) {
+    if (byGeo.has(geo)) life.set(id, byGeo.get(geo));
+  }
+  for (const [, [id, name]] of CA_PROVINCES) {
+    if (!life.has(id)) console.warn(`  no ${period} life expectancy value for ${name}`);
+  }
+  console.log(`ca province life expectancy: ${life.size}/13 provinces & territories, ${period}`);
+  return life;
+}
+
+// Alberta census-subdivision-level life expectancy, refining the provincial
+// fallback above for Alberta's 19 divisions. Hand-exported from Alberta
+// Health's Interactive Health Data Application, which has no stable direct-
+// download URL — a checked-in file rather than a live fetch, the same reason
+// na-unit-data.mjs is hand-compiled instead of downloaded.
+// Aggregated up to census-division level as an unweighted mean of its
+// municipalities: the file carries no municipal population to weight by, and
+// StatCan publishes no population estimate below census division between
+// censuses to borrow one from. A division that mixes a small hamlet with a
+// city weighs them equally for now — real municipal-level data at ~15
+// municipalities per division all the same, against the single provincial
+// figure every other division gets.
+function loadAbLifeExpectancy() {
+  const text = readFileSync(join(root, "scripts", "ca-ab-life-expectancy.csv"), "utf8");
+  const rows = csvParse(text);
+
+  // Coverage varies by year — the latest is still filling in — so pick the
+  // most recent year with "Both" sexes rows for at least 90% of Alberta's
+  // CSDs, rather than a hardcoded year, so a refreshed export just works.
+  const totalCsds = new Set(rows.map((r) => r.CSDUID)).size;
+  const years = [...new Set(rows.map((r) => r.Period))].sort();
+  const year = [...years].reverse().find((y) => {
+    const n = new Set(
+      rows.filter((r) => r.Period === y && r.Gender === "Both").map((r) => r.CSDUID)
+    ).size;
+    return n / totalCsds >= 0.9;
+  });
+  if (!year) throw new Error("no Alberta life-expectancy year clears 90% CSD coverage");
+
+  const byDivision = new Map(); // CDUID -> values[]
+  for (const r of rows) {
+    if (r.Period !== year || r.Gender !== "Both") continue;
+    const value = +r.OriginalValue;
+    if (!Number.isFinite(value)) continue;
+    const cduid = r.CSDUID.slice(0, 4);
+    if (!byDivision.has(cduid)) byDivision.set(cduid, []);
+    byDivision.get(cduid).push(value);
+  }
+
+  const life = new Map(); // CDUID -> years
+  let nCsd = 0;
+  for (const [cduid, values] of byDivision) {
+    life.set(cduid, values.reduce((a, b) => a + b, 0) / values.length);
+    nCsd += values.length;
+  }
+  console.log(
+    `ca-ab life expectancy: ${life.size} census divisions from ${nCsd} municipalities, ${year}`
+  );
+  return life;
+}
+
+// BC's 89 Local Health Areas (LHAs), the province's own health-reporting
+// geography, refining the provincial fallback for BC the way Alberta's
+// municipalities do for Alberta. Life expectancy by LHA is hand-downloaded
+// as scripts/ca-bc-life-expectancy.csv (BC Vital Statistics has no stable
+// direct-download URL either). Unlike Alberta's municipalities, though, an
+// LHA carries no census code that nests inside a census division, and its
+// name alone doesn't reliably say which regional district it's in (Kettle
+// Valley, Snow Country) — so each LHA polygon, downloaded from the BC
+// Geographic Warehouse, is matched by sampling an 8x8 grid of points across
+// it against BC's own division polygons (the same trick buildNaOverlays uses
+// to classify carved lakes) and taking whichever division wins the most
+// samples.
+const BC_LHA_DIVISION_OVERRIDE = new Map([
+  // Area, not population, decides the sampled winner, which is usually right
+  // but not here: Maple Ridge and Pitt Meadows are both Metro Vancouver
+  // municipalities, but most of this LHA's land is Fraser Valley Regional
+  // District backcountry along the upper Pitt/Alouette watersheds, which is
+  // what an area-majority sample actually picks.
+  ["Maple Ridge/Pitt Meadows", "CA-5915"], // Greater Vancouver
+]);
+
+async function loadBcLifeExpectancy(bcDivisionFeatures) {
+  const text = readFileSync(join(root, "scripts", "ca-bc-life-expectancy.csv"), "utf8");
+  const byLha = new Map(); // LHA name -> years
+  for (const r of csvParse(text)) {
+    const value = +r.LifeExpectancy;
+    if (Number.isFinite(value)) byLha.set(r.LHA, value);
+  }
+
+  const lhaFc = JSON.parse(
+    Buffer.from(await download(URLS.bcLha, "bc-local-health-areas.json")).toString("utf8")
+  );
+
+  const divisions = bcDivisionFeatures.map((f) => ({ id: f.id, polys: polysOf(f.geometry) }));
+  const divisionAt = (pt) => divisions.find((d) => inPolys(pt, d.polys))?.id;
+
+  const sampleDivision = (geometry) => {
+    const polys = polysOf(geometry);
+    const [x0, y0, x1, y1] = polys.reduce(
+      (b, p) => [
+        Math.min(b[0], p.bbox[0]), Math.min(b[1], p.bbox[1]),
+        Math.max(b[2], p.bbox[2]), Math.max(b[3], p.bbox[3]),
+      ],
+      [Infinity, Infinity, -Infinity, -Infinity]
+    );
+    const counts = new Map();
+    for (let gx = 0; gx < 8; gx++) {
+      for (let gy = 0; gy < 8; gy++) {
+        const pt = [x0 + ((gx + 0.5) / 8) * (x1 - x0), y0 + ((gy + 0.5) / 8) * (y1 - y0)];
+        if (!inPolys(pt, polys)) continue;
+        const id = divisionAt(pt);
+        if (id) counts.set(id, (counts.get(id) ?? 0) + 1);
+      }
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+  };
+
+  const byDivision = new Map(); // CDUID -> values[]
+  let nLha = 0;
+  for (const f of lhaFc.features) {
+    const name = f.properties.LOCAL_HLTH_AREA_NAME;
+    const value = byLha.get(name);
+    if (value === undefined) continue; // no CSV row, or suppressed ("N/A")
+
+    const division = BC_LHA_DIVISION_OVERRIDE.get(name) ?? sampleDivision(f.geometry);
+    if (!division) {
+      console.warn(`  BC LHA "${name}" sampled no division`);
+      continue;
+    }
+    const cduid = division.slice(3);
+    if (!byDivision.has(cduid)) byDivision.set(cduid, []);
+    byDivision.get(cduid).push(value);
+    nLha++;
+  }
+
+  const matchedNames = new Set(lhaFc.features.map((f) => f.properties.LOCAL_HLTH_AREA_NAME));
+  for (const name of byLha.keys()) {
+    if (!matchedNames.has(name))
+      console.warn(`  BC life expectancy row "${name}" matched no LHA boundary`);
+  }
+
+  const life = new Map(); // CDUID -> years
+  for (const [cduid, values] of byDivision) {
+    life.set(cduid, values.reduce((a, b) => a + b, 0) / values.length);
+  }
+  console.log(`ca-bc life expectancy: ${life.size} census divisions from ${nLha} local health areas`);
+  return life;
+}
+
 // The Canadian dollar rate na-unit-data.mjs used for provincial GDP. Applied
 // to household income too, so the two Canadian money stats sit on the same
 // footing against the US ones. Deliberately the market rate and not purchasing
@@ -1105,7 +1373,7 @@ const CAD_USD = 0.74;
 // only the split inside it is an estimate. Population needs no such trick —
 // it is published per division — and income is the census median carried
 // forward by the province's growth factor.
-function apportionCaDivisions(divisions, profile, population, growth) {
+function apportionCaDivisions(divisions, profile, population, growth, provLife, abLife, bcLife) {
   const byProvince = new Map();
   for (const f of divisions) {
     if (!byProvince.has(f.properties.st)) byProvince.set(f.properties.st, []);
@@ -1147,6 +1415,14 @@ function apportionCaDivisions(divisions, profile, population, growth) {
         mhi: d[i].mhi ? Math.round(d[i].mhi * factor * CAD_USD) : null,
         eduT: d[i].eduT ?? 0,
         eduB: d[i].eduB ?? 0,
+        ...caRace(d[i]),
+        // Alberta and BC's divisions get their own finer-grained aggregate;
+        // every other division falls back to its province's StatCan figure.
+        life:
+          abLife.get(f.id.slice(3)) ??
+          bcLife.get(f.id.slice(3)) ??
+          provLife.get(province) ??
+          null,
       });
     });
   }
@@ -1624,8 +1900,19 @@ for (const fips of popCounties.keys()) {
 const caProfile = await loadCaProfile();
 const { pop: caPop, year: caPopYear } = await loadCaPopulation();
 const caGrowth = await loadCaIncomeGrowth();
+const caProvLife = await loadCaProvinceLifeExpectancy();
+const caAbLife = loadAbLifeExpectancy();
 const caDivisions = foreignFeatures.filter((f) => f.id !== f.properties.st);
-const caRows = apportionCaDivisions(caDivisions, caProfile, caPop, caGrowth);
+const caBcLife = await loadBcLifeExpectancy(caDivisions.filter((f) => f.properties.st === "CA-BC"));
+const caRows = apportionCaDivisions(
+  caDivisions,
+  caProfile,
+  caPop,
+  caGrowth,
+  caProvLife,
+  caAbLife,
+  caBcLife
+);
 
 // Turns a hand-compiled bachelor's-attainment percentage into an eduT/eduB
 // pair comparable to the real US/Canada counts, which are both keyed on
@@ -1655,8 +1942,20 @@ for (const f of foreignFeatures) {
     eduT, eduB,
     dem: null, gop: null, tot: null,
     mhi: ca?.mhi ?? d?.mhi ?? null,
-    life: null, // CHR&R/NCHS covers US counties only
-    rT: 0, rW: 0, rB: 0, rN: 0, rA: 0, rH: 0,
+    // Real everywhere it's set: Canada (StatCan provincial life tables,
+    // Alberta and BC refined to census-division level), Mexico (INEGI state
+    // life tables), and the rest of Central America/the Caribbean (UN World
+    // Population Prospects) — all from na-unit-data.mjs except Canada.
+    life: ca?.life ?? d?.life ?? null,
+    // Real for Canada (see caRace() above); every other foreign unit has no
+    // race/ethnicity source at all, so it keeps the zeroes that hide the
+    // race bar and drop the unit out of the race rankings.
+    rT: ca?.rT ?? 0,
+    rW: ca?.rW ?? 0,
+    rB: ca?.rB ?? 0,
+    rN: ca?.rN ?? 0,
+    rA: ca?.rA ?? 0,
+    rH: ca?.rH ?? 0,
   };
 }
 
@@ -1681,12 +1980,19 @@ out.meta = {
       `Statistics Canada: population by census division, July ${caPopYear}; 2021 Census Profile ` +
       `for the ${CA_INCOME_FROM} household income and education counts, carried to ` +
       `${CA_INCOME_TO} by provincial T1 Family File income growth; GDP apportioned from ` +
-      `provincial totals by employment income`,
+      `provincial totals by employment income; life expectancy from StatCan's three-year ` +
+      `provincial/territorial life tables (13-10-0114, 13-10-0140), refined to census-division ` +
+      `level in Alberta from Alberta Health's Interactive Health Data Application and in BC from ` +
+      `BC Vital Statistics' Local Health Areas; race/ethnicity from the same 2021 Census Profile's ` +
+      `visible minority and Indigenous identity counts, not carried forward like income (see ` +
+      `caRace() in build-data.mjs for how these map onto the US categories)`,
     foreign:
       "Non-US pop & GDP: national statistics agencies / World Bank, 2023–24 (static estimates); " +
       "Mexico education & income: INEGI census 2020 & ENIGH 2024; other countries' education: " +
       "national censuses/UNESCO/World Bank (years vary); other countries' income: World Bank GNI " +
-      "per capita × a flat household-pooling factor (rough estimates throughout)",
+      "per capita × a flat household-pooling factor (rough estimates throughout); life expectancy " +
+      "is a real figure everywhere — Mexico from INEGI state life tables (2025), the rest of " +
+      "Central America/the Caribbean from the UN World Population Prospects 2024 revision (2023)",
     overlays: "Natural Earth (lakes, admin polygons for boundary classification)",
   },
 };

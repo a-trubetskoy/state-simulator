@@ -39,7 +39,15 @@ const [topo, data, overlays, worldTopo] = await Promise.all([
 ]);
 const counties = feature(topo, topo.objects.counties).features;
 const worldLand = feature(worldTopo, worldTopo.objects.land).features;
-const worldLakes = feature(worldTopo, worldTopo.objects.lakes).features;
+// The globe renderer brings the lakes in as four tiers by area and the rivers
+// as four by rank, fading each in with the zoom (see globe/layers.js). This path
+// draws the first tier of each and leaves it there. A zoom here only pushes a
+// new viewState — it never rebuilds the layer list — so following the zoom would
+// mean rebuilding every layer on each wheel tick, which is the cost this path
+// avoids during a gesture on purpose. The first tier is also the one that
+// matters for parity: it holds every lake Natural Earth carved out of its own
+// land, which is the set that has to be drawn or the continent shows holes.
+const worldLakes = feature(worldTopo, worldTopo.objects.lakes1).features;
 // The scenery's own lines, already told apart by the build so the map doesn't
 // have to: `coast` is every edge where that land meets water, `borders` every
 // edge where it meets another country, `lakeEdges` a lake's true shore with
@@ -49,7 +57,16 @@ const worldLakes = feature(worldTopo, worldTopo.objects.lakes).features;
 // first two — the map draws its own border there.
 const worldCoast = feature(worldTopo, worldTopo.objects.coast).geometry;
 const worldBorders = feature(worldTopo, worldTopo.objects.borders).geometry;
-const worldLakeMesh = feature(worldTopo, worldTopo.objects.lakeEdges).geometry;
+const worldLakeMesh = feature(worldTopo, worldTopo.objects.lakeEdges1).geometry;
+// The world's rivers, the one thing in that file that is not scenery: they run
+// over the map's own counties as much as over the land behind it. One
+// MultiLineString per tier, like the meshes above, drawn like them in a single
+// pass each. The first tier, for the reason given above the lakes.
+const RIVER_TIERS = [{ group: "rivers1", width: 1 }];
+const worldRivers = RIVER_TIERS.map((t) => ({
+  ...t,
+  geometry: feature(worldTopo, worldTopo.objects[t.group]).geometry,
+}));
 
 // Land area per unit, in square miles, straight from the same boundary
 // geometry the map draws — not a separately published figure, so it can
@@ -434,6 +451,7 @@ const STAT_DEFS = {
   blk: { get: (s) => (s.rT ? (100 * s.rB) / s.rT : 0), fmt: fmtPct, has: (s) => s.rT > 0, bar: "abs" },
   hsp: { get: (s) => (s.rT ? (100 * s.rH) / s.rT : 0), fmt: fmtPct, has: (s) => s.rT > 0, bar: "abs" },
   asn: { get: (s) => (s.rT ? (100 * s.rA) / s.rT : 0), fmt: fmtPct, has: (s) => s.rT > 0, bar: "abs" },
+  nat: { get: (s) => (s.rT ? (100 * s.rN) / s.rT : 0), fmt: fmtPct, has: (s) => s.rT > 0, bar: "abs" },
 };
 
 // Data view: totals (population, GDP, electoral votes) become scaled symbols,
@@ -445,12 +463,17 @@ const SYMBOL_STATS = {
   ev: { mark: "dots", noun: "electoral votes", unit: "electoral vote", fill: [125, 102, 186, 115], edge: [86, 66, 138, 255] },
 };
 
+// Hues are re-stepped from the old muted set for the waffle's small dots:
+// an 8px dot carries far less color than a bar segment, and the old steps
+// failed colorblind-separation checks (White/Black blues nearly identical,
+// Asian/Native a classic red-green pair). Same hue per group, more chroma,
+// bigger lightness splits between neighbors.
 const RACE_GROUPS = [
-  { key: "rW", label: "White", color: "#7f9fc4" },
-  { key: "rB", label: "Black", color: "#9678b6" },
-  { key: "rH", label: "Hispanic", color: "#e0a353" },
-  { key: "rA", label: "Asian", color: "#66b295" },
-  { key: "rN", label: "Native", color: "#c47f72" },
+  { key: "rW", label: "White", color: "#5b8fd0" },
+  { key: "rB", label: "Black", color: "#7b4fa6" },
+  { key: "rH", label: "Hispanic", color: "#c98a20" },
+  { key: "rA", label: "Asian", color: "#35a189" },
+  { key: "rN", label: "Native", color: "#ad4f3f" },
 ];
 
 // ------------------------------------------------------------- projection
@@ -522,8 +545,27 @@ const PROJ = { main: HOME_FIT };
 // point after C3 is "does it look identical to the current map side by side",
 // and nothing else can answer it. C8 deletes the loser.
 const USE_GLOBE = !/[?&]deck\b/.test(location.search);
+// Counties the globe's carver asked for and was refused: a county duplicated
+// into an inset box stays whole because the insets keep the deck path and
+// cannot show a carve. Read (and cleared) by applyCarve to word its notice.
+const carveSkips = new Set(); // fips
 const globeMap = USE_GLOBE
-  ? await createGlobeMap({ canvas: document.getElementById("map-canvas"), features: counties })
+  ? await createGlobeMap({
+      canvas: document.getElementById("map-canvas"),
+      features: counties,
+      carve: {
+        countyRows: data.counties,
+        fetchTracts: (fips) => {
+          if (insetOf(fips) !== "main") return carveSkips.add(fips), null;
+          // A unit with no census tracts — a Canadian division, a Mexican
+          // state, a Caribbean country — carves as one tract covering the
+          // whole of it, so its numbers divide between the pieces by land
+          // share alone (see the whole-unit note in src/globe/carve.js).
+          if (isForeignUnit(fips)) return { whole: true };
+          return tractFile(fips);
+        },
+      },
+    })
   : null;
 if (globeMap) {
   // The compiler fits the same projection to the same lower-48 features, so
@@ -641,6 +683,7 @@ const worldLakeParts = [];
 const worldLakeEdges = [];
 const worldCoastPaths = [];
 const worldBorderPaths = [];
+const worldRiverPaths = Object.fromEntries(RIVER_TIERS.map((t) => [t.group, []]));
 // Globe furniture: the ocean disc and the graticule. The disc is analytic
 // and rotation-independent — an
 // orthographic sphere always projects to a circle of radius `scale` about
@@ -973,6 +1016,12 @@ function bakeMain() {
     worldCoastPaths: projectLines(worldCoast, "main").map((path) => ({ path, region: "main" })),
     worldBorderPaths: projectLines(worldBorders, "main").map((path) => ({ path, region: "main" })),
     worldLakeEdgePaths: projectLines(worldLakeMesh, "main").map((path) => ({ path, region: "main" })),
+    worldRiverPaths: Object.fromEntries(
+      worldRivers.map((t) => [
+        t.group,
+        projectLines(t.geometry, "main").map((path) => ({ path, region: "main" })),
+      ])
+    ),
     lakesUnder: [],
     lakesOver: [],
     arcPaths: [],
@@ -1104,6 +1153,7 @@ function assembleBake(main) {
   put(worldLakeEdges, main.worldLakeEdgePaths);
   put(worldCoastPaths, main.worldCoastPaths);
   put(worldBorderPaths, main.worldBorderPaths);
+  for (const t of RIVER_TIERS) put(worldRiverPaths[t.group], main.worldRiverPaths[t.group]);
   put(lakeParts.under, main.lakesUnder, INSET_BAKE.lakesUnder);
   put(lakeParts.over, main.lakesOver, INSET_BAKE.lakesOver);
   put(lakeEdges.under, closedRings(lakeParts.under));
@@ -1132,11 +1182,14 @@ assembleBake(bakeMain());
 
 // The globe copies are always drawn; the inset duplicates render in a
 // second deck on a canvas above the map, over a white backing (so they
-// cover whatever map happens to lie under the box). Both boxes start open.
-// Collapsing a box just filters its region out of the inset arrays; the
-// main arrays never change, so deck's layer data stays referentially
-// stable across ordinary refreshes.
-const insetHidden = { ak: false, hi: false };
+// cover whatever map happens to lie under the box). Both boxes start open —
+// except on a narrow screen (the stylesheet's stacked-layout cutoff), where
+// their fixed pixel size would cover most of the map; the toggle buttons
+// still open them. Collapsing a box just filters its region out of the inset
+// arrays; the main arrays never change, so deck's layer data stays
+// referentially stable across ordinary refreshes.
+const narrowScreen = window.matchMedia("(max-width: 800px)");
+const insetHidden = { ak: narrowScreen.matches, hi: narrowScreen.matches };
 const isMain = (d) => d.region === "main";
 
 // ------------------------------------------------ carves: base plus overlay
@@ -1156,6 +1209,12 @@ const isMain = (d) => d.region === "main";
 // handed mainCountyParts at construction — while MAIN/INSET_ALL get fresh
 // filtered snapshots so deck.gl notices the change.
 const splits = new Map(); // parentId -> { pieces, backingId, idSeq, origState, parentPartsByRegion, ...splitCountyGeometry() }
+// The globe path's counterpart of `splits`: C6's carver owns the cuts and the
+// pieces (inside globeMap), and these two hold what the APP remembers about
+// them — the states a carved county came from, and which piece rows are
+// registered in the model right now. See syncGlobeCarves.
+const globeCarveMeta = new Map(); // parent fips -> { origState, parentState, largestPiece }
+let globePieceIndex = new Map(); // piece id -> the registered piece
 let carveMode = false; // the Carve button's knife tool is armed
 let carvePending = []; // click-to-draw knife vertices awaiting their finish
 let knifeDrag = null; // a left press while carving, until it settles as drag or click
@@ -1396,6 +1455,9 @@ function rebuildDerived() {
   MAIN.worldLakeEdges = worldLakeEdges.slice();
   MAIN.worldCoastPaths = worldCoastPaths.slice();
   MAIN.worldBorderPaths = worldBorderPaths.slice();
+  MAIN.worldRiverPaths = Object.fromEntries(
+    RIVER_TIERS.map((t) => [t.group, worldRiverPaths[t.group].slice()])
+  );
   MAIN.coastPaths = coastPaths.filter(isMain);
   MAIN.shorePaths = shorePaths.filter(isMain);
   MAIN.borderPaths = borderPaths.filter(isMain);
@@ -1543,7 +1605,16 @@ function makeMainLabeler() {
   // in lon/lat so a turn re-projects the baselines instead of re-running the
   // layout. The two inset boxes keep the SVG labeler below: their projections
   // never move, so nothing about them wants baking to the sphere.
-  if (globeMap) return { update: (args) => globeMap.updateLabels(args) };
+  //
+  // The layout reads whole units, so a carved county — whose parent has left
+  // the assignment — is handed to the state of its largest piece. Coarse on
+  // purpose, and the same rule the deck path's spin preview uses: at label
+  // scale a county is a few raster cells, and the exact split would mean
+  // teaching the raster about piece geometry for a placement nudge.
+  if (globeMap)
+    return {
+      update: (args) => globeMap.updateLabels({ ...args, assign: globeLabelAssign(args.assign) }),
+    };
   return createStateLabeler({
     group: stateLabelGroup,
     name: "main",
@@ -1615,23 +1686,28 @@ function viewState() {
   };
 }
 
-// The camera for the inset deck. Zoom 0 makes one design unit one CSS
-// pixel, so the boxes keep a constant on-screen size, and the target is
-// solved from screen = world - target + size/2 so the cluster's bottom-left
-// design corner (the Alaska box's left edge, and the shared INSET_BOTTOM_Y)
-// pins to a fixed spot just above the Reset view / Alaska / Hawaii buttons.
-// Pan and zoom never touch this view.
+// The camera for the inset deck. The boxes render at a fixed on-screen size
+// — insetScale() CSS pixels per design unit: 1 on desktop, and on a map too
+// narrow for the full-size cluster (Alaska and Hawaii side by side, plus the
+// anchor margin at both ends) the whole cluster scales down to fit the
+// width. The target is solved from screen = (world - target) * s + size/2 so
+// the cluster's bottom-left design corner (the Alaska box's left edge, and
+// the shared INSET_BOTTOM_Y) pins to a fixed spot just above the Reset view
+// / Alaska / Hawaii buttons. Pan and zoom never touch this view.
 const INSET_ANCHOR = { left: 8, bottom: 38 };
+function insetScale() {
+  const clusterW = INSETS.hi.x + INSETS.hi.w - INSETS.ak.x;
+  return Math.max(0.3, Math.min(1, (viewWidth - 2 * INSET_ANCHOR.left) / clusterW));
+}
 function insetViewState() {
-  const x0 = INSETS.ak.x;
-  const y1 = INSET_BOTTOM_Y;
+  const s = insetScale();
   return {
     target: [
-      x0 - INSET_ANCHOR.left + viewWidth / 2,
-      y1 - (viewHeight - INSET_ANCHOR.bottom) + viewHeight / 2,
+      INSETS.ak.x + (viewWidth / 2 - INSET_ANCHOR.left) / s,
+      INSET_BOTTOM_Y - (viewHeight / 2 - INSET_ANCHOR.bottom) / s,
       0,
     ],
-    zoom: 0,
+    zoom: Math.log2(s),
   };
 }
 
@@ -2480,6 +2556,37 @@ function buildLayers() {
       updateTriggers: { getColor: [trigger, dataView] },
       ...FLAT,
     }),
+    // Rivers, over the ground and under every edge of the water they run into.
+    // Above the county fills and the border band, because a river is a fact
+    // about the ground and breaking it wherever a state line happens to fall
+    // would read as a rendering fault. Below the lakes and the coastline, so a
+    // mouth that overshoots its estuary is covered by the edge it overshot
+    // rather than striking out across open water. The coastline's blue, in a
+    // weight that tapers with the tier, and gone in data view, where the ground
+    // is read by color and a thread across it is only clutter.
+    //
+    // Two differences from the globe stack. The tiers are frozen at their home
+    // view state rather than following the zoom, for the reason given where
+    // RIVER_TIERS is defined. And the globe draws every lake in the world above
+    // this line, where here the scenery lakes are drawn far below, back with the
+    // rest of the world — so a river running into Lake Victoria is covered there
+    // and not here. That costs a few pixels of overshoot on lakes outside North
+    // America, and closing it would mean drawing the world's lakes twice.
+    ...RIVER_TIERS.map(
+      (t) =>
+        new PathLayer({
+          id: t.group,
+          data: MAIN.worldRiverPaths[t.group],
+          visible: !dataView,
+          getPath: (d) => d.path,
+          getColor: COAST,
+          getWidth: t.width,
+          widthUnits: "pixels",
+          jointRounded: true,
+          capRounded: true,
+          ...FLAT,
+        })
+    ),
     // Lakes that sit inside unit polygons (not carved out of the land) are
     // drawn over the fills instead, in the same water blue — and their edge
     // matches the carved lakes' lakeshore treatment (the coast-line layer
@@ -2849,8 +2956,15 @@ const DEVICE_PROPS = {
 function onViewResize(width, height) {
   viewWidth = Math.max(1, width);
   viewHeight = Math.max(1, height);
-  if (globeMap) globeMap.resize(viewWidth, viewHeight);
-  else {
+  if (globeMap) {
+    globeMap.resize(viewWidth, viewHeight);
+    // setTransform bakes the letterbox fit into the camera's pan, and the
+    // resize just changed that fit. Without re-deriving the pan here, any
+    // width-changing resize while the map is zoomed or panned leaves the
+    // drawn globe (and every pick) shifted against the SVG overlay — data
+    // symbols float off their states and a click lands countries away.
+    globeMap.setTransform(transform);
+  } else {
     deck?.setProps({ viewState: viewState() });
     hoverDeck?.setProps({ viewState: viewState() });
   }
@@ -3298,14 +3412,15 @@ function settleSpin() {
 // non-scaling stroke keeps the frame hairline-thin.
 
 // The overlay SVG works in its 975x610 viewBox, so the frames need design →
-// CSS (the inset camera, zoom 0) → viewBox (the reverse of the SVG's own
-// meet fit), rebuilt whenever the canvas resizes.
+// CSS (the inset camera at its current scale) → viewBox (the reverse of the
+// SVG's own meet fit), rebuilt whenever the canvas resizes.
 function placeInsetUi() {
+  const s = insetScale();
   const t = insetViewState().target;
   const fit = Math.min(viewWidth / 975, viewHeight / 610);
-  const ax = viewWidth / 2 - t[0] - (viewWidth - 975 * fit) / 2;
-  const ay = viewHeight / 2 - t[1] - (viewHeight - 610 * fit) / 2;
-  const place = `scale(${1 / fit}) translate(${ax} ${ay})`;
+  const ax = (viewWidth / 2 - (viewWidth - 975 * fit) / 2) / s - t[0];
+  const ay = (viewHeight / 2 - (viewHeight - 610 * fit) / 2) / s - t[1];
+  const place = `scale(${s / fit}) translate(${ax} ${ay})`;
   insetGroup.attr("transform", place);
   insetLabelGroup.attr("transform", place);
   insetDataLabelGroup.attr("transform", place);
@@ -3366,17 +3481,29 @@ for (const key of ["ak", "hi"]) {
   });
 }
 
+// Crossing the phone/desktop cutoff resets the boxes to that side's default
+// (closed on a phone, open on desktop). The load-time seed alone would leave
+// the boxes open after a rotation or a resize into the narrow layout — where,
+// even scaled down, they are better off out of the way until asked for.
+narrowScreen.addEventListener("change", (e) => {
+  insetHidden.ak = insetHidden.hi = e.matches;
+  rebuildVisible();
+  renderInsetUi();
+  scheduleRefresh();
+});
+
 // Merging the spin preview's outlines costs ~50 ms; paying it at startup
 // keeps it out of the first frame of the first drag, which is where it would
 // show as a stutter. The globe renderer has no preview to build.
 if (!globeMap) (spinGeometry(), spinWorldGeometry());
 
 // Which open inset box, if any, the given CSS-pixel point falls in — the
-// inverse of the inset camera, which at zoom 0 is just a shift.
+// inverse of the inset camera: a shift and, on a narrow map, its scale.
 function insetBoxAt(x, y) {
+  const s = insetScale();
   const t = insetViewState().target;
-  const wx = x + t[0] - viewWidth / 2;
-  const wy = y + t[1] - viewHeight / 2;
+  const wx = (x - viewWidth / 2) / s + t[0];
+  const wy = (y - viewHeight / 2) / s + t[1];
   for (const key of ["ak", "hi"]) {
     if (insetHidden[key]) continue;
     const b = INSETS[key];
@@ -3519,6 +3646,176 @@ function doRefresh() {
   }
 }
 
+// ----------------------------------------------------------- touch gestures
+//
+// On touch, one finger keeps the left-button meaning the mouse has — spin the
+// globe, paint, drive the knife — and two fingers pinch-zoom and pan. The
+// pinch builds a d3 transform in the SVG's own 975x610 viewBox space and
+// applies it through zoom.transform, so it rides the exact pipeline the wheel
+// does: the zoom handler moves the decks and the label groups, and nothing
+// else has to know a pinch exists. Mouse and pen never enter this section.
+//
+// The little state machine below arbitrates the fingers: "one" is a live
+// single-finger gesture (owned by the existing handlers), a second finger
+// cancels it and starts a "pinch", and when the pinch loses a finger the
+// survivor is a "tail" — inert on purpose, so the finger left resting on the
+// glass can't start painting or spinning until it lifts and presses again.
+
+const activeTouches = new Map(); // pointerId -> [x, y] in viewBox coordinates
+let touchState = "idle"; // "idle" | "one" | "pinch" | "tail"
+let pinchAnchor = null; // { t0, p0, d0 } — transform, world midpoint, distance at anchor time
+// A multi-finger gesture can still end in a browser-synthesized click for the
+// primary finger (which would clear the selection); clicks before this stamp
+// are swallowed.
+let suppressClicksUntil = 0;
+// Double-tap synthesis: the last clean touch tap, and the stamp of the last
+// synthesized activation so a browser that fires a real dblclick for the same
+// double-tap (Chrome on Android does under touch-action: none) doesn't run it
+// twice.
+let lastTap = null; // { t, x, y } in client coordinates
+let lastSyntheticDbl = -Infinity;
+
+const vbPoint = (ev) => d3.pointer(ev, svg.node());
+
+// The two oldest fingers drive the pinch; a third is tracked but ignored.
+function pinchPair() {
+  const it = activeTouches.values();
+  return [it.next().value, it.next().value];
+}
+
+function beginPinch() {
+  const [a, b] = pinchPair();
+  const c = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+  pinchAnchor = {
+    t0: transform,
+    p0: transform.invert(c),
+    d0: Math.max(Math.hypot(a[0] - b[0], a[1] - b[1]), 1e-3),
+  };
+}
+
+function applyPinch(ev) {
+  const [a, b] = pinchPair();
+  const c = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+  const d = Math.max(Math.hypot(a[0] - b[0], a[1] - b[1]), 1e-3);
+  // zoom.transform applies its argument verbatim — neither the filter nor the
+  // scale extent runs — so the clamp happens here, read live because a globe
+  // turn moves the lower bound (applyScaleExtent). The world anchor pins the
+  // ground under the fingers' midpoint, which is also what makes the pair a
+  // pan when it travels without spreading. Pan is unclamped, like the wheel's.
+  const [kMin, kMax] = zoom.scaleExtent();
+  const k = Math.max(kMin, Math.min(kMax, pinchAnchor.t0.k * (d / pinchAnchor.d0)));
+  const t = d3.zoomIdentity.translate(c[0], c[1]).scale(k).translate(-pinchAnchor.p0[0], -pinchAnchor.p0[1]);
+  // Passing ev sets sourceEvent on the emitted zoom events, so the handler
+  // treats a pinch exactly like a wheel (hides the tooltip, catches up hover).
+  svg.call(zoom.transform, t, c, ev);
+}
+
+// A second finger abandons whatever the first was doing, without committing
+// it: the spin settles where it is, the brush stroke and the knife stroke
+// stop (placed knife vertices survive — pinch to reposition, keep placing),
+// and the parked give-back click is forgotten.
+function cancelOneFingerAction() {
+  if (spinFrom) {
+    settleSpin();
+    spinMoved = false;
+  }
+  brush = 0;
+  clickUndo = null;
+  if (knifeDrag) {
+    knifeDrag = null;
+    renderKnife(null);
+  }
+  lastPointerEvent = null;
+  hideTooltip();
+  if (hoverFips) {
+    hoverFips = null;
+    scheduleHover();
+  }
+}
+
+// Touch bookkeeping for a press. True means the event belongs to the pinch
+// machinery and the mode logic must not see it.
+function touchDown(ev) {
+  if (ev.pointerType !== "touch") return false;
+  activeTouches.set(ev.pointerId, vbPoint(ev));
+  if (touchState === "idle" && activeTouches.size === 1) {
+    touchState = "one";
+    return false; // the existing one-finger logic runs
+  }
+  if (touchState === "one") {
+    cancelOneFingerAction();
+    touchState = "pinch";
+    beginPinch();
+    return true;
+  }
+  if (touchState === "tail" && activeTouches.size >= 2) {
+    touchState = "pinch";
+    beginPinch();
+    return true;
+  }
+  return true; // a third finger mid-pinch, or any stray press
+}
+
+// The same for a move: a pinch move re-applies the transform, a tail move is
+// swallowed, a one-finger move falls through to the existing handlers.
+function touchMove(ev) {
+  if (ev.pointerType !== "touch") return false;
+  if (activeTouches.has(ev.pointerId)) activeTouches.set(ev.pointerId, vbPoint(ev));
+  if (touchState === "pinch") {
+    applyPinch(ev);
+    return true;
+  }
+  return touchState === "tail";
+}
+
+function endTouchSequence(ev) {
+  touchState = "idle";
+  pinchAnchor = null;
+  suppressClicksUntil = ev.timeStamp + 500;
+}
+
+// A release (or cancel). "skip" = the pinch machinery consumed it, "tap" = a
+// tracked single-finger touch ended and may be half of a double-tap, false =
+// not touch, or not this machinery's business — the ordinary settle runs.
+function touchRelease(ev) {
+  if (ev.pointerType !== "touch") return false;
+  const tracked = activeTouches.delete(ev.pointerId);
+  if (touchState === "pinch") {
+    if (activeTouches.size >= 2) beginPinch(); // re-anchor on the survivors
+    else if (activeTouches.size === 1) {
+      pinchAnchor = null;
+      touchState = "tail";
+    } else endTouchSequence(ev);
+    return "skip";
+  }
+  if (touchState === "tail") {
+    if (activeTouches.size === 0) endTouchSequence(ev);
+    return "skip";
+  }
+  if (touchState === "one" && activeTouches.size === 0) touchState = "idle";
+  return tracked ? "tap" : false;
+}
+
+// Two clean taps close together in time and place synthesize the dblclick
+// touch never reliably gets (iOS Safari fires none under touch-action: none).
+// Read before the release settles — the settle resets the flags that tell a
+// tap from a drag — but acted on after it, so the second tap's own action
+// (vertex placement, the selection click) lands first, like desktop's
+// click-click-dblclick order.
+function detectDoubleTap(ev) {
+  if (!spinMoved && !knifeDrag?.moved) {
+    const prev = lastTap;
+    lastTap = { t: ev.timeStamp, x: ev.clientX, y: ev.clientY };
+    if (
+      prev &&
+      ev.timeStamp - prev.t < 350 &&
+      Math.hypot(ev.clientX - prev.x, ev.clientY - prev.y) < 30
+    )
+      return (lastTap = null), true;
+  } else lastTap = null;
+  return false;
+}
+
 // ---------------------------------------------------------------- painting
 
 let brush = 0; // the ev.buttons bit that sustains the stroke; 0 = idle
@@ -3545,6 +3842,10 @@ function applyBrush(fips) {
 }
 
 svg.on("pointerdown", (ev) => {
+  // Touch bookkeeping first: a second finger turns any gesture into a pinch,
+  // and while the pinch (or its leftover tail finger) is live, no mode logic
+  // may see the press.
+  if (touchDown(ev)) return;
   // A left press grabs the sphere. d3.zoom's own drag-pan is filtered out
   // entirely, so the two can't fight over the gesture; the wheel still zooms.
   if (!paintMode && !carveMode && ev.button === 0) {
@@ -3595,7 +3896,7 @@ svg.on("pointerdown", (ev) => {
   }
   applyBrush(fips);
 });
-window.addEventListener("pointerup", () => {
+function settlePointerAction() {
   // A spin settles on release (see settleSpin).
   if (spinFrom) {
     settleSpin();
@@ -3620,13 +3921,45 @@ window.addEventListener("pointerup", () => {
   }
   clickUndo = null;
   brush = 0;
-});
+}
+
+function settlePointer(ev) {
+  const release = touchRelease(ev);
+  if (release === "skip") return;
+  // The double-tap test reads the tap-or-drag flags the settle resets, so it
+  // runs first; the activation waits until the settle has landed the tap's
+  // own action (see detectDoubleTap).
+  const dbl = release === "tap" && ev.type === "pointerup" && detectDoubleTap(ev);
+  settlePointerAction();
+  if (dbl) {
+    lastSyntheticDbl = ev.timeStamp;
+    handleDoubleActivate(ev);
+  }
+  // A lifted finger hovers nothing: clear the tint and the stored move, the
+  // way pointerleave does for a mouse that left the map. (Kept after the
+  // settle — the knife settle above wants the stroke's state intact.)
+  if (ev.pointerType === "touch") {
+    lastPointerEvent = null;
+    if (hoverFips) {
+      hoverFips = null;
+      scheduleHover();
+    }
+  }
+}
+window.addEventListener("pointerup", settlePointer);
+// Touch gestures can end in a cancel instead of a release — an OS edge
+// swipe, an incoming call, palm rejection — and without this the spin, the
+// knife stroke or the brush would stay live with no finger down.
+window.addEventListener("pointercancel", settlePointer);
 svg.on("contextmenu", (ev) => ev.preventDefault());
 
 // Clicking a state selects it; clicking anywhere that isn't a county — the
 // sea, a lake, past the border — clears the selection. A drag-pan never
 // deselects: d3.zoom suppresses the click that follows a moved gesture.
 svg.on("click", (ev) => {
+  // The click a browser synthesizes for the primary finger of a finished
+  // pinch is not a selection gesture either.
+  if (ev.timeStamp < suppressClicksUntil) return;
   if (paintMode || carveMode) return;
   // The click that ends a spin drag is not a selection gesture.
   if (spinMoved) {
@@ -3640,8 +3973,15 @@ svg.on("click", (ev) => {
 // Double-click on a carved county's piece merges the county back together.
 // While carving, it instead finishes the click-to-draw cut — its two clicks
 // each placed a vertex at the same spot, and the cut dedupes them. d3.zoom's
-// own dblclick zoom is already unbound above.
+// own dblclick zoom is already unbound above. Touch reaches this through the
+// synthesized double-tap (detectDoubleTap), so the native handler skips a
+// dblclick the synthesis already answered.
 svg.on("dblclick", (ev) => {
+  if (ev.timeStamp < suppressClicksUntil) return;
+  if (ev.timeStamp - lastSyntheticDbl < 300) return;
+  handleDoubleActivate(ev);
+});
+function handleDoubleActivate(ev) {
   if (paintMode) return;
   if (carveMode) {
     if (carvePending.length >= 2) finishCarve(carvePending);
@@ -3649,6 +3989,21 @@ svg.on("dblclick", (ev) => {
   }
   const fips = pickCounty(ev);
   if (!fips) return;
+  if (globeMap) {
+    if (!globePieceIndex.has(fips)) return;
+    // The whole county lands in the double-clicked piece's state, which is
+    // the least surprising reading of "make this one whole again".
+    const keepSid = assign.get(fips);
+    const parent = globeMap.carve.rejoin(fips);
+    if (!parent) return;
+    syncGlobeCarves();
+    assign.set(parent, keepSid);
+    recountStates();
+    touchTerritory();
+    scheduleRefresh();
+    mapNote(`${data.counties[parent].name} is whole again.`);
+    return;
+  }
   for (const [pid, s] of splits) {
     if (s.pieces.some((p) => p.id === fips)) {
       unsplitCounty(pid, fips);
@@ -3656,7 +4011,7 @@ svg.on("dblclick", (ev) => {
       return;
     }
   }
-});
+}
 
 // ----------------------------------------------------------------- tooltip
 
@@ -3746,7 +4101,10 @@ function processPointerMove() {
       if (!clickUndo) applyBrush(fips);
     }
   }
-  if (!fips) {
+  // The tooltip is hover UI, and touch has no hover: under a finger it would
+  // just sit beside a paint stroke re-rendering itself per county. The hover
+  // tint and the brush above still run for touch.
+  if (!fips || ev.pointerType === "touch") {
     hideTooltip();
     return;
   }
@@ -3779,14 +4137,29 @@ function processPointerMove() {
     const title = c.name === sName ? `<b>${c.name}</b>` : `<b>${c.name}</b> · ${sName}`;
     // A split county's halves carry real tract counts for population, race,
     // education and income, but GDP and the 2024 vote only exist per county
-    // and divide by population share — say so wherever the numbers show.
-    const est = c.est ? `<br><span class="tip-note">Piece of a carved county · GDP &amp; 2024 vote estimated</span>` : "";
+    // and divide by population share — say so wherever the numbers show. A
+    // piece of a unit carved as a single tract (nothing finer published: a
+    // Canadian division, a Mexican state, a country) divides everything by
+    // land share, which is a stronger caveat and gets its own wording. Such a
+    // piece is recognizable by its one weight keyed by the parent itself.
+    const piece = globeMap ? globePieceIndex.get(fips) : null;
+    const wholeCut = !!piece && piece.weights.has(piece.fips);
+    const est = wholeCut
+      ? `<br><span class="tip-note">Piece of a carved unit · figures estimated by land share</span>`
+      : c.est
+        ? `<br><span class="tip-note">Piece of a carved county · GDP &amp; 2024 vote estimated</span>`
+        : "";
     tooltip.innerHTML = `${title}<br>${fmtPop(c.pop)} people${margin}${income}${lifeExp}${est}`;
   }
   placeTooltip(ev);
 }
 
 svg.on("pointermove", (ev) => {
+  // A pinch move re-applies the two-finger transform; a tail move (the finger
+  // a pinch left behind) is inert. Either way the mode logic below never sees
+  // it — which also keeps lastPointerEvent null for the whole pinch, so no
+  // pick runs mid-gesture.
+  if (touchMove(ev)) return;
   // Mid-spin the pointer is steering the globe, not hovering a county: one
   // radius of travel is one radian of arc, so the grabbed point tracks the
   // cursor. Dragging right brings lower longitudes to the middle, and
@@ -3866,7 +4239,11 @@ function renderElections(tally) {
   }
 }
 
-function renderRaceBar(s) {
+// The breakdown draws as a waffle: 100 dots, one per person in a hundred,
+// filled group by group in reading order. Largest-remainder rounding turns
+// the percentages into whole people that always sum to exactly 100, and the
+// legend quotes those same people counts, so the two never disagree by a dot.
+function renderRaceWaffle(s) {
   const wrap = el("race-wrap");
   if (!s.rT) {
     wrap.hidden = true;
@@ -3876,15 +4253,24 @@ function renderRaceBar(s) {
   const named = RACE_GROUPS.map((rg) => ({ ...rg, pct: (100 * s[rg.key]) / s.rT }));
   const other = Math.max(0, 100 - named.reduce((sum, rg) => sum + rg.pct, 0));
   const segs = [...named, { label: "Other", color: "#a9a9a9", pct: other }];
-  el("race-bar").innerHTML = segs
-    .map(
-      (rg) =>
-        `<i title="${rg.label} ${rg.pct.toFixed(1)}%" style="width:${rg.pct}%;background:${rg.color}"></i>`
+  for (const g of segs) g.people = Math.floor(g.pct);
+  let left = 100 - segs.reduce((sum, g) => sum + g.people, 0);
+  for (const g of [...segs].sort((a, b) => (b.pct % 1) - (a.pct % 1))) {
+    if (left <= 0) break;
+    g.people += 1;
+    left -= 1;
+  }
+  el("race-grid").innerHTML = segs
+    .filter((g) => g.people > 0)
+    .map((g) =>
+      `<i title="${g.label} — ${g.people} of 100 people (${g.pct.toFixed(1)}%)" style="background:${g.color}"></i>`.repeat(
+        g.people
+      )
     )
     .join("");
   el("race-legend").innerHTML = segs
-    .filter((rg) => rg.pct >= 1)
-    .map((rg) => `<span><i style="background:${rg.color}"></i>${rg.label} ${Math.round(rg.pct)}%</span>`)
+    .filter((g) => g.people > 0)
+    .map((g) => `<span><i style="background:${g.color}"></i>${g.label} ${g.people}%</span>`)
     .join("");
 }
 
@@ -3964,7 +4350,7 @@ function renderSidebar() {
     el("dial-needle").setAttribute("transform", `rotate(${(-lean * 90) / 30} 26 27)`);
     renderStatDots("d-seats", s.seats);
     renderStatDots("d-ev", s.ev);
-    renderRaceBar(s);
+    renderRaceWaffle(s);
   }
 
   // rankings list with mini bars scaled to the leader
@@ -4011,7 +4397,112 @@ function renderSidebar() {
       </li>`;
     })
     .join("");
+
+  updateTrayPeek();
 }
+
+// -------------------------------------------------------------------- tray
+
+// On the phone layout the state panel and the sidebar live in a bottom sheet
+// (#tray) that peeks above the bottom edge. The peek shows the grab handle
+// plus a cut-off sliver of the sheet's own content — the hint that there is
+// more to pull up. While the sheet is down, a tap anywhere on it opens it and
+// a drag anywhere on it moves it; once open, only the handle drags or closes
+// it, because fingers inside the sheet scroll the content. A moved drag snaps
+// open or closed on release, and the peek label names the selected state so a
+// tap on the map shows something even while the sheet is down. On desktop the
+// sheet dissolves into the main grid (display: contents), so the handlers
+// here bail behind the same 800px cutoff the stylesheet uses.
+const tray = el("tray");
+const trayHandle = el("tray-handle");
+const trayContent = el("tray-content");
+const trayPeekLabel = el("tray-peek");
+let trayOpen = false;
+let trayDrag = null; // { y0, top0, moved } while a handle drag is live
+let trayDragged = false; // swallows the click that follows a moved drag
+
+function setTrayOpen(on) {
+  trayOpen = on;
+  tray.classList.toggle("open", on);
+  trayHandle.setAttribute("aria-expanded", String(on));
+  // The closed sheet peeks the top of its content; forget any scroll so that
+  // is what actually shows.
+  if (!on) trayContent.scrollTop = 0;
+}
+
+function updateTrayPeek() {
+  const info = selected && stateInfo.get(selected);
+  if (!info) {
+    trayPeekLabel.textContent = "State details & rankings";
+    return;
+  }
+  const s = getStats().get(selected);
+  trayPeekLabel.textContent =
+    s && s.n > 0 ? `${info.name} · ${fmtPop(s.pop)} people` : info.name;
+}
+
+// How much of the sheet stays visible when closed — the stylesheet owns the
+// number, so read it back rather than let the two drift apart.
+function trayPeekHeight() {
+  const peek = parseFloat(getComputedStyle(tray).getPropertyValue("--tray-peek"));
+  return peek || trayHandle.offsetHeight;
+}
+
+tray.addEventListener("click", (ev) => {
+  if (trayDragged) {
+    trayDragged = false;
+    return;
+  }
+  if (!narrowScreen.matches) return;
+  // Closed: any tap on the visible peek opens the sheet — pointer capture
+  // (below) retargets the click to the sheet itself, so nothing under the
+  // finger fires instead. Open: only the handle closes; other clicks belong
+  // to the content.
+  if (!trayOpen || ev.target === tray || ev.target.closest("#tray-handle")) {
+    setTrayOpen(!trayOpen);
+  }
+});
+tray.addEventListener("pointerdown", (ev) => {
+  if (!narrowScreen.matches) return;
+  const onHandle = Boolean(ev.target.closest("#tray-handle"));
+  // The open sheet drags only by its handle — fingers inside it scroll the
+  // content. The closed sheet drags from anywhere on the peek.
+  if (trayOpen && !onHandle) return;
+  // A press on the closed content sliver must not act on what lies under the
+  // finger (focus the name input, press a button) — it only steers the sheet.
+  if (!onHandle) ev.preventDefault();
+  trayDrag = { y0: ev.clientY, top0: tray.getBoundingClientRect().top, moved: false };
+  tray.setPointerCapture(ev.pointerId);
+  tray.classList.add("dragging");
+});
+tray.addEventListener("pointermove", (ev) => {
+  if (!trayDrag) return;
+  const dy = ev.clientY - trayDrag.y0;
+  if (Math.abs(dy) > 4) trayDrag.moved = true;
+  if (!trayDrag.moved) return;
+  // The sheet rides translateY between fully open (0) and peek-only.
+  const openTop = window.innerHeight - tray.offsetHeight;
+  const closed = tray.offsetHeight - trayPeekHeight();
+  const ty = Math.max(0, Math.min(closed, trayDrag.top0 + dy - openTop));
+  tray.style.transform = `translateY(${ty}px)`;
+});
+function settleTrayDrag() {
+  if (!trayDrag) return;
+  const moved = trayDrag.moved;
+  trayDrag = null;
+  // Transition back on before the snap, so the sheet glides to its resting
+  // place; the inline transform comes off last so the glide starts from
+  // where the finger left it.
+  tray.classList.remove("dragging");
+  if (moved) {
+    trayDragged = true;
+    const shown = window.innerHeight - tray.getBoundingClientRect().top;
+    setTrayOpen(shown > tray.offsetHeight / 2);
+  }
+  tray.style.transform = "";
+}
+tray.addEventListener("pointerup", settleTrayDrag);
+tray.addEventListener("pointercancel", settleTrayDrag);
 
 el("rank-list").addEventListener("click", (ev) => {
   const li = ev.target.closest("li[data-sid]");
@@ -4080,19 +4571,26 @@ el("copy-json").addEventListener("click", async () => {
   if (!selected) return;
   const info = stateInfo.get(selected);
   // A carved piece has no FIPS of its own — its session-local id means
-  // nothing elsewhere — so it exports its parent county's code plus the
-  // tract GEOIDs that define it: stable Census identifiers that reconstruct
-  // the exact geography anywhere.
-  const pieceInfo = new Map();
-  for (const [pid, s] of splits) for (const p of s.pieces) pieceInfo.set(p.id, { parent: pid, tracts: p.tracts });
+  // nothing elsewhere — so it exports its parent county's code plus what
+  // reconstructs it: the tract GEOIDs alone when the piece follows tract
+  // lines (the shape presets read), or C6's cut records when it follows a
+  // drawn line, since a split tract can't be written down as a tract list.
+  const pieceEntry = globeMap
+    ? (id) => globeMap.carve.pieceById(id) && globeMap.carve.serialize(id)
+    : (() => {
+        const pieceInfo = new Map();
+        for (const [pid, s] of splits)
+          for (const p of s.pieces) pieceInfo.set(p.id, { fips: pid, tracts: [...p.tracts].sort() });
+        return (id) => pieceInfo.get(id);
+      })();
   const payload = {
     state: { name: info.name, ...(info.custom ? {} : { fips: selected }) },
     counties: [...assign]
       .filter(([, sid]) => sid === selected)
       .map(([id]) => {
-        const piece = pieceInfo.get(id);
-        return piece
-          ? { name: data.counties[id].name, fips: piece.parent, tracts: [...piece.tracts].sort() }
+        const entry = pieceEntry(id);
+        return entry
+          ? { name: data.counties[id].name, ...entry }
           : { name: data.counties[id].name, fips: id };
       })
       .sort((a, b) => a.fips.localeCompare(b.fips) || a.name.localeCompare(b.name)),
@@ -4210,7 +4708,14 @@ el("reset").addEventListener("click", () => {
   setCarveMode(false);
   // Reset means the as-loaded map, so carved counties become whole again —
   // which also restores origAssign to its parent-keyed original.
-  for (const pid of [...splits.keys()]) unsplitCounty(pid);
+  if (globeMap) {
+    if (globeCarveMeta.size) {
+      globeMap.carve.reset();
+      syncGlobeCarves();
+    }
+  } else {
+    for (const pid of [...splits.keys()]) unsplitCounty(pid);
+  }
   assign = new Map(origAssign);
   for (const [sid, info] of stateInfo) if (info.custom) stateInfo.delete(sid);
   // Admitted units step back out of the union, and every color — including
@@ -4223,6 +4728,11 @@ el("reset").addEventListener("click", () => {
   recountStates();
   setPaintMode(false);
   scheduleRefresh();
+  // "Reset states" also returns to the actual home view — a turned globe
+  // shouldn't survive a reset any more than hand-picked colors do.
+  if (viewRotation[0] !== HOME_ROTATION[0] || viewRotation[1] !== HOME_ROTATION[1]) {
+    setRotation(HOME_ROTATION);
+  }
   svg.call(zoom.transform, HOME_TRANSFORM);
 });
 
@@ -4274,6 +4784,10 @@ function mergeTarget(preset) {
 // (resolvePreset also returns the pieces themselves for whole-state presets —
 // they live in data.counties — and they pass through unchanged.)
 const liveUnitIds = (fips) => {
+  if (globeMap) {
+    const pieces = globeMap.carve.piecesOf(fips);
+    return pieces.length ? pieces.map((p) => p.id) : [fips];
+  }
   const s = splits.get(fips);
   return s ? s.pieces.map((p) => p.id) : [fips];
 };
@@ -4309,17 +4823,32 @@ async function applyPreset(preset) {
   const sid = mergeTarget(preset) ?? createState(preset.name);
   for (const fips of fipsList) for (const id of liveUnitIds(fips)) assign.set(id, sid);
 
-  // A preset's partial counties are carved along the tract ids it names, and
-  // carving is the one thing on the map the globe renderer does not do yet:
-  // C6's model builds the pieces, and nothing joins it to the split registry
-  // this path writes into. They are left unclaimed rather than claimed whole,
-  // so the preset means less than it should but never the wrong thing.
+  // A preset's partial counties are carved along the tract ids it names — the
+  // same engine the knife drives, told directly which tracts fall inside. On
+  // the globe that is C6's own file format: each entry replays as a cut along
+  // tract lines, and reapplying a preset that already carved a county walks
+  // into the standing cut instead of making it again.
   if (partials.length && globeMap) {
-    mapNote(
-      `${listNames(partials.map((p) => data.counties[p.fips]?.name ?? p.fips))} ` +
-        `${partials.length === 1 ? "is" : "are"} claimed in part by this preset, ` +
-        `and carving is not wired to the globe yet — left whole and unclaimed.`
-    );
+    carving = true;
+    try {
+      const missing = [];
+      let carvedAny = false;
+      for (const { fips, tracts } of partials) {
+        if (!(await tractFile(fips))) {
+          missing.push(data.counties[fips]?.name ?? fips);
+          continue;
+        }
+        if ((await globeMap.carve.applyEntry({ fips, tracts })).length) carvedAny = true;
+      }
+      if (carvedAny) syncGlobeCarves();
+      // A second pass claims: every cut now stands, so applyEntry just walks
+      // the tree and returns the pieces on each entry's side — including any
+      // this preset made on an earlier run.
+      for (const { fips, tracts } of partials) await claimEntryPieces({ fips, tracts }, sid);
+      if (missing.length) mapNote(`No tract data for ${listNames(missing)}.`);
+    } finally {
+      carving = false;
+    }
   } else if (partials.length) {
     carving = true;
     try {
@@ -4399,13 +4928,6 @@ function mapNote(text) {
 }
 
 function setCarveMode(on) {
-  // See the note in applyPreset: the globe has C6's carve model and no wiring
-  // from it to the app's split registry, so the knife is held back rather than
-  // left to cut a map that would not show the result.
-  if (on && globeMap) {
-    mapNote("Carving is not wired to the globe renderer yet — open ?deck to use it.");
-    return;
-  }
   if (carveMode === !!on) return;
   carveMode = !!on;
   if (carveMode && paintMode) setPaintMode(false);
@@ -4417,7 +4939,25 @@ function setCarveMode(on) {
   knifeGroup.attr("transform", transform);
 }
 carveBtn.addEventListener("click", () => setCarveMode(!carveMode));
-el("carve-done").addEventListener("click", () => setCarveMode(false));
+// Done finishes a pending click-drawn cut before leaving the mode — on touch
+// it is the only way to finish one besides a double-tap, and with a mouse it
+// beats discarding a cut the user just drew. finishCarve slices the points
+// and clears the knife itself, so setCarveMode's own clearKnife is a no-op.
+el("carve-done").addEventListener("click", () => {
+  if (carvePending.length >= 2 && !carving) finishCarve(carvePending);
+  setCarveMode(false);
+});
+// The button form of the right-press that removes the last placed vertex —
+// touch has no right button.
+el("carve-undo").addEventListener("click", () => {
+  if (carving || !carvePending.length) return;
+  carvePending.pop();
+  renderKnife(null);
+});
+// The globe's knife cuts along the drawn line itself, and the checkbox asks
+// for the old whole-tract assignment instead. The deck fallback only ever does
+// whole tracts, so on it the checkbox would be a lie and stays hidden.
+if (globeMap) el("carve-intact-wrap").hidden = false;
 
 // The knife line rides the overlay SVG (in map coordinates, under the zoom
 // transform like the labels), so redrawing it per pointer move is a cheap
@@ -4557,6 +5097,218 @@ const listNames = (names) =>
     ? names.join(" and ")
     : `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
 
+// ----------------------------------------------- carving, on the globe path
+//
+// C6's carver (src/globe/carve.js) owns the cuts, the pieces and their
+// allocated rows; the bridge in src/globe/map.js keeps the renderer agreeing
+// with it. What is left for here is the APP model, and syncGlobeCarves is the
+// one place it is reconciled: piece rows into data.counties, assignments and
+// their originals, the inset table, the adjacency the state coloring reads.
+// Everything below it — the knife, a preset's partial counties, the GeoJSON
+// import, rejoin, reset — changes the carver first and then calls it.
+
+// A recut's new leaves extend the divided leaf's id by one i/o letter
+// (carve.js, relabel), so stripping letters walks back to whatever piece this
+// one was cut from — which is whose state it inherits, the same "carving just
+// creates seams to paint across" rule the deck path has.
+function inheritPieceState(id, meta) {
+  let probe = id;
+  while (probe.length > 1) {
+    if (assign.has(probe)) return assign.get(probe);
+    const last = probe[probe.length - 1];
+    if ((last === "i" || last === "o") && !probe.endsWith(":")) probe = probe.slice(0, -1);
+    else break;
+  }
+  return meta.parentState;
+}
+
+// Adjacency for the state coloring. Exact piece-to-piece pairs come from the
+// dividers; a piece's OUTER neighbours are over-approximated as all of its
+// county's, which can only ever make the coloring stricter — the exact answer
+// would mean re-deriving which stretch of the county line each piece owns,
+// for a constraint that is advisory to begin with.
+function rebuildGlobeAdjacency(pieces, dividers) {
+  const parents = new Set(globeCarveMeta.keys());
+  const expand = (n) => (parents.has(n) ? globeMap.carve.piecesOf(n).map((p) => p.id) : [n]);
+  countyAdj.clear();
+  for (const [k, v] of BASE_ADJ) {
+    if (parents.has(k)) continue;
+    countyAdj.set(k, v.flatMap(expand));
+  }
+  for (const p of pieces) countyAdj.set(p.id, (BASE_ADJ.get(p.fips) ?? []).flatMap(expand));
+  for (const d of dividers) {
+    for (const [x, y] of [
+      [d.a, d.b],
+      [d.b, d.a],
+    ]) {
+      const list = countyAdj.get(x) ?? [];
+      if (!list.includes(y)) list.push(y);
+      countyAdj.set(x, list);
+    }
+  }
+}
+
+// The globe labeler reads whole units; a carved parent is handed to the state
+// of its largest piece (see makeMainLabeler for why coarse is right here).
+function globeLabelAssign(base) {
+  if (!globeCarveMeta.size) return base;
+  const merged = new Map(base);
+  for (const [fips, meta] of globeCarveMeta) {
+    const sid = assign.get(meta.largestPiece);
+    if (sid !== undefined) merged.set(fips, sid);
+  }
+  return merged;
+}
+
+// Reconcile the app model with the carver, wholesale — the same
+// derive-not-patch rule the carver itself follows, so no sequence of carves,
+// recuts and rejoins can leave the two disagreeing.
+function syncGlobeCarves() {
+  const { pieces, dividers } = globeMap.carve.sync();
+  const next = new Map(pieces.map((p) => [p.id, p]));
+  const parents = new Set(pieces.map((p) => p.fips));
+
+  // What the county's states were, captured before the parent is retired.
+  for (const fips of parents) {
+    if (!globeCarveMeta.has(fips))
+      globeCarveMeta.set(fips, { origState: origAssign.get(fips), parentState: assign.get(fips) });
+  }
+
+  // New pieces inherit their state while the pieces they were cut from are
+  // still in the assignment.
+  const inherited = new Map();
+  for (const p of pieces) {
+    if (!assign.has(p.id)) inherited.set(p.id, inheritPieceState(p.id, globeCarveMeta.get(p.fips)));
+  }
+
+  // Retired pieces leave the model.
+  for (const [id] of globePieceIndex) {
+    if (next.has(id)) continue;
+    assign.delete(id);
+    origAssign.delete(id);
+    INSET_OF.delete(id);
+    delete data.counties[id];
+  }
+
+  // Rows land fresh on every sync — a recut re-allocates every piece of its
+  // county — and each piece is original territory of the parent's original
+  // state, so right-click give-back and Discard return it there.
+  for (const p of pieces) {
+    data.counties[p.id] = p.row;
+    if (!inherited.has(p.id)) continue;
+    assign.set(p.id, inherited.get(p.id));
+    origAssign.set(p.id, globeCarveMeta.get(p.fips).origState);
+    INSET_OF.set(p.id, insetOf(p.fips));
+  }
+
+  // The first carve retires the parent; a county whose last cut is undone
+  // comes back in one piece.
+  for (const fips of parents) {
+    assign.delete(fips);
+    origAssign.delete(fips);
+  }
+  for (const [fips, meta] of [...globeCarveMeta]) {
+    if (parents.has(fips)) {
+      meta.largestPiece = pieces
+        .filter((p) => p.fips === fips)
+        .reduce((a, b) => (b.km2 > a.km2 ? b : a)).id;
+    } else {
+      assign.set(fips, meta.parentState);
+      origAssign.set(fips, meta.origState);
+      globeCarveMeta.delete(fips);
+    }
+  }
+
+  rebuildGlobeAdjacency(pieces, dividers);
+  globePieceIndex = next;
+  // The data view places its symbols and value labels from these; on the globe
+  // only a rotation recomputes them otherwise.
+  computeCountyGeo();
+}
+
+// Claim for a state the pieces an exported `{ fips, tracts }` entry names:
+// replay it (a cut already standing is walked into, not made again) and take
+// the pieces on its inside. A piece that mostly lies OUTSIDE the named tracts
+// is skipped — a boundary that only grazes a county collapses to the whole of
+// it (carve.js's graze floor), and "that side of the cut" then covers ground
+// the entry never asked for.
+async function claimEntryPieces(entry, sid) {
+  const ids = await globeMap.carve.applyEntry(entry);
+  const inside = entry.tracts ? new Set(entry.tracts) : null;
+  let claimed = 0;
+  for (const id of ids) {
+    const piece = globeMap.carve.pieceById(id);
+    if (!piece) continue;
+    if (inside) {
+      let ok = true;
+      for (const [t, w] of piece.weights) {
+        if (w >= 0.5 && !inside.has(t)) {
+          ok = false;
+          break;
+        }
+      }
+      if (!ok) continue;
+    }
+    assign.set(id, sid);
+    claimed++;
+  }
+  return claimed;
+}
+
+// The knife's design-space polyline as lon/lat. Long chords are subdivided
+// first: a freehand stroke records a point every few pixels, but click-to-draw
+// can span the map, and a straight line in the projection is not a straight
+// line on the ground.
+function designStrokeToLonLat(points) {
+  const STEP = 4; // design units, ~19 km
+  const out = [];
+  for (let i = 0; i < points.length; i++) {
+    if (i) {
+      const [x1, y1] = points[i - 1];
+      const [x2, y2] = points[i];
+      const n = Math.ceil(Math.hypot(x2 - x1, y2 - y1) / STEP);
+      for (let j = 1; j < n; j++) {
+        const p = globeMap.unprojectDesign([x1 + ((x2 - x1) * j) / n, y1 + ((y2 - y1) * j) / n]);
+        if (p) out.push(p);
+      }
+    }
+    const p = globeMap.unprojectDesign(points[i]);
+    if (p) out.push(p);
+  }
+  return out;
+}
+
+async function applyCarveGlobe(points) {
+  carveSkips.clear();
+  const res = await globeMap.carve.line(designStrokeToLonLat(points), {
+    keepTractsIntact: el("carve-intact").checked,
+  });
+  if (res.carved.length) {
+    syncGlobeCarves();
+    recountStates();
+    touchTerritory();
+    scheduleRefresh();
+  }
+  // The carver reports counties by name, so the inset refusals — recorded by
+  // fips in the tract loader — are matched back through the same unit list
+  // the names came from.
+  const nameOf = (f) => globeMap.units[globeMap.unitOf.get(f)]?.name ?? f;
+  const inset = new Set([...carveSkips].map(nameOf));
+  const noData = (res.noData ?? []).filter((n) => !inset.has(n));
+  const notes = [];
+  if (res.carved.length)
+    notes.push(`Carved ${listNames(res.carved)} — when done carving, double-click a piece to rejoin.`);
+  if (noData.length) notes.push(`No tract data for ${listNames(noData)}.`);
+  if (inset.size)
+    notes.push(
+      `${listNames([...inset])} ${inset.size === 1 ? "is" : "are"} duplicated in an inset box, which can't show a carve — left whole.`
+    );
+  if (res.full?.length)
+    notes.push(`${listNames(res.full)} ${res.full.length === 1 ? "is" : "are"} carved as fine as it goes.`);
+  if (res.rejected) notes.push(`Nothing was cut: ${res.rejected}.`);
+  mapNote(notes.length ? notes.join(" ") : "To slice a county, draw the line in one side and out the other.");
+}
+
 // A finished stroke, applied: refine the partition of every candidate
 // county whose tracts the cut divides. One world rebuild at the end covers
 // however many counties the stroke went through.
@@ -4564,6 +5316,10 @@ async function applyCarve(points) {
   if (carving || points.length < 2) return;
   carving = true;
   try {
+    if (globeMap) {
+      await applyCarveGlobe(points);
+      return;
+    }
     const carved = [];
     const noData = [];
     for (const fips of carveCandidates(points)) {
@@ -4836,6 +5592,10 @@ async function importGeoJSON(file) {
     let carvedAny = false;
     const carved = [];
     const noData = [];
+    // Globe path only: entries to claim once every cut stands, and partially
+    // covered counties that live in an inset box, which cannot show a carve.
+    const pendingClaims = [];
+    const insetPartial = [];
     for (const [fips, e] of carveIndex) {
       if (e.x1 < rb.x0 || e.x0 > rb.x1 || e.y1 < rb.y0 || e.y0 > rb.y1) continue;
       // Classify by the county's own outline vertices: all inside means the
@@ -4865,6 +5625,27 @@ async function importGeoJSON(file) {
       const insideTracts = new Set();
       for (const [tid, c] of centroids) if (inRegion(c)) insideTracts.add(tid);
       if (!insideTracts.size) continue;
+      // The globe carves through C6: the tract set becomes an exported-format
+      // entry, replayed as a cut along tract lines. Claims wait for the second
+      // pass below, once the model has been synced.
+      if (globeMap) {
+        if (insideTracts.size === centroids.size) {
+          // every tract centroid inside even though the outline strays out:
+          // the whole county belongs to the region
+          for (const id of liveUnitIds(fips)) assign.set(id, sid);
+          whole++;
+        } else if (insetOf(fips) !== "main") {
+          insetPartial.push(data.counties[fips].name);
+        } else {
+          const entry = { fips, tracts: [...insideTracts].sort() };
+          if ((await globeMap.carve.applyEntry(entry)).length) {
+            carvedAny = true;
+            pendingClaims.push(entry);
+            carved.push(data.counties[fips].name);
+          }
+        }
+        continue;
+      }
       if (insideTracts.size < centroids.size)
         carvedAny = carveCounty(fips, payload, centroids, insideTracts) || carvedAny;
       const s = splits.get(fips);
@@ -4885,7 +5666,10 @@ async function importGeoJSON(file) {
       if (claimed) carved.push(data.counties[fips].name);
     }
 
-    if (carvedAny) rebuildWorld();
+    if (globeMap && carvedAny) {
+      syncGlobeCarves();
+      for (const entry of pendingClaims) await claimEntryPieces(entry, sid);
+    } else if (carvedAny) rebuildWorld();
     if (whole || carved.length) {
       recountStates();
       touchTerritory();
@@ -4898,6 +5682,11 @@ async function importGeoJSON(file) {
     const notes = [];
     if (bits.length) notes.push(`Painted ${bits.join(" and ")}.`);
     if (noData.length) notes.push(`No tract data for ${listNames(noData)}.`);
+    if (insetPartial.length)
+      notes.push(
+        `${listNames(insetPartial)} ${insetPartial.length === 1 ? "crosses" : "cross"} the boundary but ` +
+          `${insetPartial.length === 1 ? "sits" : "sit"} in an inset box, which can't show a carve — left whole.`
+      );
     mapNote(notes.length ? notes.join(" ") : "Nothing on the map falls inside that boundary.");
   } finally {
     carving = false;
@@ -4905,12 +5694,7 @@ async function importGeoJSON(file) {
 }
 
 const geojsonInput = el("geojson-file");
-el("from-geojson").addEventListener("click", () => {
-  // Same reason as the knife: this claims whole counties and CARVES the ones
-  // the boundary crosses.
-  if (globeMap) return mapNote("Importing a boundary carves counties, which is not wired to the globe renderer yet — open ?deck to use it.");
-  geojsonInput.click();
-});
+el("from-geojson").addEventListener("click", () => geojsonInput.click());
 geojsonInput.addEventListener("change", () => {
   const file = geojsonInput.files?.[0];
   geojsonInput.value = ""; // so the same file can be imported again
@@ -5004,7 +5788,12 @@ function renderSources() {
     gdppc: [`GDP: BEA ${m.gdpYear}`, `Population: Census ${m.popYear}`],
     mhi: [`Income: SAIPE ${m.incomeYear}`],
     bach: [`Education: ACS ${m.eduWindow} (adults 25+)`],
-    life: [`Life expectancy: County Health Rankings & Roadmaps (NCHS), ${m.lifeExpWindow}`],
+    life: [
+      `Life expectancy: County Health Rankings & Roadmaps (NCHS), ${m.lifeExpWindow}`,
+      "Canada: StatCan provincial life tables, Alberta and BC refined to census-division level",
+      "Mexico: INEGI state life tables",
+      "Rest of Central America/Caribbean: UN World Population Prospects",
+    ],
     // The margin view carries the election replay, whose apportionment also
     // leans on population.
     margin: [
@@ -5018,7 +5807,10 @@ function renderSources() {
       ...(m.electionYear ? [`President: ${m.electionYear} county returns`] : []),
     ],
   };
-  const list = SOURCES_FOR[rankStatSel.value] ?? [`Race/ethnicity: Census ${m.raceYear}`];
+  const list = SOURCES_FOR[rankStatSel.value] ?? [
+    `Race/ethnicity: Census ${m.raceYear}`,
+    "Canada: 2021 Census Profile (visible minority & Indigenous identity, mapped onto the US categories)",
+  ];
   list.push("Non-US pop, GDP, education & income: hand-compiled estimates");
   el("sources").textContent = [...list, "Shorelines & lakes: Natural Earth"].join(" · ");
 }

@@ -12,6 +12,10 @@
 //   hideInData   layers the data view drops outright.
 //   dataColor    layers the data view keeps but re-colours.
 //
+// One switch is not the app's but the camera's: `fadeIn` gives a layer a zoom
+// range to appear over, so a layer can be absent at a wide view and ordinary at
+// a close one. The river tiers are what it exists for.
+//
 // Anything that depends on WHO OWNS the ground — the band, the state borders,
 // the selection outline — is not a switch here at all. Those read the per-unit
 // attribute table in the shader (see UNIT_ATTR in shaders.js), so painting a
@@ -58,6 +62,33 @@ export const COLORS = {
 };
 
 export const BAND_WIDTH = 10; // css px across the border, so five to a side
+
+// How the river tiers thicken as the view closes in: from their nominal width
+// at zoom 4, where the first tier has just arrived, to 6x it at 16, the closest
+// the camera goes. Rivers are the one thing on the map whose width is
+// worth more than a hairline up close — at the zoom where a county fills the
+// screen, the river through it is the feature being looked at, and a 1 px thread
+// reads as a scratch on the fill rather than as water. Nothing else grows: a
+// county line or a coastline is a boundary, and a boundary wants to be findable,
+// not loud.
+//
+// At the top of the range a major river is 6 px against the coastline's 1.1, and
+// that is deliberate rather than a stroke that got away: this is the zoom where
+// a county fills the screen, and at that scale a river is a thing with a width,
+// not a boundary between two grounds. It also hides the thinning. Points are
+// 1.6 km apart and a kilometre is about 3.4 px at zoom 16, so the facets are
+// roughly 5 px long — a 6 px stroke with round joins is wider than its own
+// faceting, and the line reads as a curve instead of a chain of chords.
+//
+// Linear in k puts most of the growth in the last octave, which is where it is
+// wanted: 4 to 8 is a doubling of the zoom and a third of the growth, 8 to 16 is
+// the other doubling and the remaining two thirds.
+//
+// Every tier shares this range and this factor, so the taper between them holds
+// at every zoom rather than closing up at one end. layer-check enforces both
+// that and the ceiling of 16 — a range that topped out past MAX_ZOOM would be a
+// width the map could never reach.
+const RIVER_GROW = [4, 16, 6];
 
 // The border groups the band's stencil stroke runs along, and the same list the
 // selection outline is subset from. Everything else is a line neither has any
@@ -134,6 +165,66 @@ export function buildLayers() {
       colorB: COLORS.stateLine,
       dataColor: [0, 0, 0, 0],
     }),
+    // Rivers, over the ground and under every edge of the water they run into.
+    // Above the county fills and the border band, because a river is a fact
+    // about the ground and breaking it wherever a state line happens to fall
+    // would read as a rendering fault. Below the coastline and the lakes,
+    // because a river ends where the water starts: drawn under those, a mouth
+    // that overshoots its estuary or a stream that overshoots a lake shore is
+    // covered by the edge it overshot instead of striking out across open
+    // water. The coastline's blue, and gone in the data view, where the ground
+    // is read by colour and a thread across it is only clutter.
+    //
+    // Four tiers, coarsest first, each fading in over a stretch of the zoom.
+    // Drawing all of them at every zoom is right at no zoom at all: 1,214 lines
+    // over a whole globe is a haze, and the same 1,214 is thin once the view is
+    // down to a few counties. build-world.mjs decides what falls in each tier;
+    // this is where they appear.
+    //
+    // The ranges are in d3.zoom's own k, which is what the user turns: 0.2 puts
+    // the whole sphere in frame, 1 is the home view over the lower 48, 16 is as
+    // close as the view goes. They do not overlap, so at most one tier is ever
+    // mid-fade, and each is fully in before the next begins. A fade rather than
+    // a switch because 267 lines arriving at one threshold reads as a flash.
+    //
+    // The home view carries no rivers at all: the first tier starts at 2, a zoom
+    // step past it. At the scale where the lower 48 fits on screen a river is a
+    // thread that adds texture and no information, and the map is about who owns
+    // the ground. Rivers are what you find on the way in, and by the last zoom
+    // step every one Natural Earth draws is there.
+    //
+    // They interleave with the lake tiers above rather than landing on the same
+    // zooms, so each step in brings one kind of water and then the other instead
+    // of doubling the map's detail at a stroke.
+    //
+    // Width tapers with the tier. Natural Earth's 10m river file carries no
+    // stroke weight of its own, but the tiers ARE one, and a Mississippi
+    // heavier than a creek does more for legibility than the filtering does.
+    // The whole taper then thickens with the zoom, by RIVER_GROW above.
+    line("rivers1", COLORS.coast, 1, {
+      name: "rivers major",
+      hideInData: true,
+      fadeIn: [2.8, 3.8],
+      grow: RIVER_GROW,
+    }),
+    line("rivers2", COLORS.coast, 0.85, {
+      name: "rivers large",
+      hideInData: true,
+      fadeIn: [6.5, 8],
+      grow: RIVER_GROW,
+    }),
+    line("rivers3", COLORS.coast, 0.72, {
+      name: "rivers small",
+      hideInData: true,
+      fadeIn: [10.5, 12],
+      grow: RIVER_GROW,
+    }),
+    line("rivers4", COLORS.coast, 0.6, {
+      name: "rivers finest",
+      hideInData: true,
+      fadeIn: [13, 15],
+      grow: RIVER_GROW,
+    }),
     // The map's outer edge: blue where the far side is water, and that means
     // the Great Lakes as well as the ocean, so the lakeshore runs belong here
     // beside the coast ones. They differ only in the halo above, which the
@@ -146,8 +237,51 @@ export function buildLayers() {
     // hidden by the very edge they are meant to replace. They therefore do the
     // job main.js splits between its world-lakes and lakes-over layers, and go
     // page white in the data view exactly as those do: water carries no data.
-    fill("worldLakes", COLORS.lake, { dataColor: COLORS.white }),
-    line("worldLakeEdges", COLORS.coast, 1.1),
+    //
+    // Four tiers by area, largest first, brought in with the zoom the way the
+    // rivers are. All 1,346 at a whole-continent view is a rash of blue specks,
+    // most of them under a pixel; the first tier is the 90 an atlas prints at
+    // that scale, and the rest arrive as there is room for them.
+    //
+    // The first tier never fades, and that is a correctness rule rather than a
+    // taste one. Natural Earth carves its largest lakes out of the land it
+    // draws, so those lakes are HOLES: with no water in them the ocean shows
+    // through the middle of a continent, and the coast halo that hides under
+    // the land rings them in sea blue. build-world.mjs pins every carved lake
+    // to this tier whatever its area, and layer-check holds the tier to no fade.
+    //
+    // Every fill first, then every shore. A named bay can reuse its parent
+    // lake's ring and land in a different tier by area, so a later tier's fill
+    // drawn between the pairs could cover an earlier tier's shoreline.
+    fill("worldLakes1", COLORS.lake, { name: "lakes major", dataColor: COLORS.white }),
+    fill("worldLakes2", COLORS.lake, {
+      name: "lakes large",
+      dataColor: COLORS.white,
+      fadeIn: [1.5, 2.5],
+    }),
+    fill("worldLakes3", COLORS.lake, {
+      name: "lakes small",
+      dataColor: COLORS.white,
+      fadeIn: [4.5, 6],
+    }),
+    fill("worldLakes4", COLORS.lake, {
+      name: "lakes finest",
+      dataColor: COLORS.white,
+      fadeIn: [8.5, 10],
+    }),
+    line("worldLakeEdges1", COLORS.coast, 1.1, { name: "lake shores major" }),
+    line("worldLakeEdges2", COLORS.coast, 1.1, {
+      name: "lake shores large",
+      fadeIn: [1.5, 2.5],
+    }),
+    line("worldLakeEdges3", COLORS.coast, 1.1, {
+      name: "lake shores small",
+      fadeIn: [4.5, 6],
+    }),
+    line("worldLakeEdges4", COLORS.coast, 1.1, {
+      name: "lake shores finest",
+      fadeIn: [8.5, 10],
+    }),
     line("border", COLORS.borderLine, 1.1, { name: "border line" }),
     // The selected state's edge: a dark line over a wider white casing, which
     // cuts a bright gap between the line and the border bands on either side.

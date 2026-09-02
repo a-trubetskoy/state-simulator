@@ -509,11 +509,11 @@ function frame(now) {
 // Inside the scene pass, so it runs only on a frame that redraws the map — the
 // labels move when the map moves and at no other time. That is also why they
 // need no caching of their own: the renderer's own dirty check gates them.
-function drawLabels() {
+function drawLabels(dim) {
   const t0 = performance.now();
   labels.prepare();
   push(stats.labels, performance.now() - t0);
-  labels.draw();
+  labels.draw(dim);
 }
 
 const fmt = (v) => (v == null ? "--" : v.toFixed(2));

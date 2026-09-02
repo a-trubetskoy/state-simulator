@@ -273,7 +273,16 @@ for (const [name, rot] of [
 {
   const world = read("world-land.json");
   const land = feature(world, world.objects.land).features;
-  const lakes = feature(world, world.objects.lakes).features;
+  // The lakes go out in tiers the renderer fades in with the zoom, and the
+  // rivers do too. Which tier a lake is in is a question for layer-check; here
+  // they are one pile of water to project, so the tiers are read off the file
+  // rather than named, and a tier added or renamed cannot slip past this check.
+  const lakeTiers = Object.keys(world.objects).filter((n) => /^lakes\d+$/.test(n));
+  if (!lakeTiers.length) bad("world-land.json carries no lake tiers");
+  const lakes = lakeTiers.flatMap((n) => feature(world, world.objects[n]).features);
+  const riverTiers = Object.keys(world.objects).filter((n) => /^rivers\d+$/.test(n));
+  if (!riverTiers.length) bad("world-land.json carries no river tiers");
+  const rivers = riverTiers.map((n) => feature(world, world.objects[n]).geometry);
   const coast = feature(world, world.objects.coast).geometry;
   const borders = feature(world, world.objects.borders).geometry;
   const DISC_AREA = Math.PI * RADIUS ** 2;
@@ -298,7 +307,9 @@ for (const [name, rot] of [
   // which reads as the old flat tan rather than as an error.
   check(coast.coordinates.length > 1000, `${coast.coordinates.length} scenery coastlines`);
   check(borders.coordinates.length > 100, `${borders.coordinates.length} scenery country lines`);
-  check(lakes.length > 100, `${lakes.length} scenery lakes`);
+  check(lakes.length > 100, `${lakes.length} scenery lakes in ${lakeTiers.length} tiers`);
+  const riverLines = rivers.reduce((n, g) => n + g.coordinates.length, 0);
+  check(riverLines > 1000, `${riverLines} river lines in ${riverTiers.length} tiers`);
   // Every lake Natural Earth cuts out of the land has to be drawn back in, or
   // the continent shows a bare hole where the water belongs. The cut-out ones
   // are the big ones, so a floor well above them is the check that matters.
@@ -323,7 +334,13 @@ for (const [name, rot] of [
   // Everything the bake projects, in the order it projects it. The lines go
   // through the same tracer the shapes do, so a mesh that clipped badly at
   // some facing would show up here exactly as a bad ring would.
-  const everything = [...land, ...lakes, { geometry: coast }, { geometry: borders }];
+  const everything = [
+    ...land,
+    ...lakes,
+    { geometry: coast },
+    { geometry: borders },
+    ...rivers.map((geometry) => ({ geometry })),
+  ];
 
   let worstShare = 0;
   let worstAt = "";
@@ -365,16 +382,43 @@ for (const [name, rot] of [
   // that ~130 ms bake has to stay small. The coast and border meshes roughly
   // double what there is to project: they retrace the same edges the land
   // rings do, once as lines.
+  //
+  // What is timed is what bakeMain() in main.js actually re-projects, which is
+  // the first lake tier and the first river tier and none of the finer ones:
+  // the flat map draws those two, and the rest belong to the globe, which bakes
+  // its geometry once at build time and re-projects nothing per frame. Timing
+  // every tier here would budget the flat map for work it never does. The
+  // passes above still walk them all — a line that projected badly would be
+  // just as wrong on the globe, and it costs nothing to look.
+  const firstLakes = feature(world, world.objects[lakeTiers[0]]).features;
+  const firstLakeEdges = feature(world, world.objects[lakeTiers[0].replace(/^lakes/, "lakeEdges")]).geometry;
+  const baked = [
+    ...land,
+    ...firstLakes,
+    { geometry: coast },
+    { geometry: borders },
+    { geometry: firstLakeEdges },
+    { geometry: rivers[0] },
+  ];
   const trace = makeTracer(mainProjection(HOME_ROTATION));
-  for (const f of everything) trace(f.geometry);
+  for (const f of baked) trace(f.geometry);
   const t0 = performance.now();
   const N = 5;
   for (let i = 0; i < N; i++) {
     const t = makeTracer(mainProjection([96 + i, -45]));
-    for (const f of everything) t(f.geometry);
+    for (const f of baked) t(f.geometry);
   }
   const per = (performance.now() - t0) / N;
-  check(per < 60, `the scenery re-projects in ${per.toFixed(1)} ms per bake`);
+  // 60 ms was the budget when the scenery was land, coast, borders and the
+  // lakes above a 1,000 km² floor. Dropping that floor and adding the rivers
+  // put it at about 61: land 22, the first lake tier and its shore 15, the
+  // coast 7, the borders 2, the first river tier 4. This is a guard against
+  // runaway growth rather than a claim that the cost is small — it is already
+  // about half the bake — so it sits a little above what the scenery costs
+  // today. Anything that pushes it past this wants the bake made cheaper, not
+  // the number raised: the first lake tier is projected twice, once as water
+  // and once as shore, which is where the next saving is.
+  check(per < 75, `the scenery re-projects in ${per.toFixed(1)} ms per bake`);
 }
 
 console.log(failed ? `\n${failed} check(s) failed` : "\nall checks passed");

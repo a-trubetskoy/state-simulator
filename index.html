@@ -6,33 +6,91 @@
     <title>State Simulator</title>
     <link
       rel="icon"
-      href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22><defs><clipPath id=%22c%22><path d=%22M2 1h12v6.3c0 4.4-3.6 6.7-6 7.7-2.4-1-6-3.3-6-7.7z%22/></clipPath></defs><g clip-path=%22url(%23c)%22><rect width=%2216%22 height=%2216%22 fill=%22%23fff%22/><rect x=%223.71%22 y=%221%22 width=%221.72%22 height=%2215%22 fill=%22%23bf0a30%22/><rect x=%227.14%22 y=%221%22 width=%221.72%22 height=%2215%22 fill=%22%23bf0a30%22/><rect x=%2210.57%22 y=%221%22 width=%221.72%22 height=%2215%22 fill=%22%23bf0a30%22/><rect x=%222%22 y=%221%22 width=%2212%22 height=%224.6%22 fill=%22%23002868%22/></g><path d=%22M2 1h12v6.3c0 4.4-3.6 6.7-6 7.7-2.4-1-6-3.3-6-7.7z%22 fill=%22none%22 stroke=%22%23002868%22 stroke-width=%221.2%22/></svg>"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 34 34'%3E%3Ccircle cx='17' cy='17' r='15.5' fill='%23182338' stroke='%233b82f6' stroke-width='1.6'/%3E%3Ccircle cx='17' cy='17' r='11.6' fill='none' stroke='%23566d92' stroke-width='0.8'/%3E%3Cpolygon points='17,8.2 19.3,14 25.4,14 20.5,17.7 22.4,23.6 17,20 11.6,23.6 13.5,17.7 8.6,14 14.7,14' fill='%23ffffff'/%3E%3C/svg%3E"
     />
   </head>
   <body>
     <div id="app">
-      <header>
-        <div class="brand">
-          <h1>State Simulator</h1>
-          <p class="tagline">Flip counties into new states and see how they'd rank.</p>
-        </div>
-        <div class="preset-box">
+      <header id="masthead">
+        <svg id="seal" width="24" height="24" viewBox="0 0 34 34" aria-hidden="true">
+          <circle cx="17" cy="17" r="15.5" fill="#182338" stroke="#3b82f6" stroke-width="1.6" />
+          <circle cx="17" cy="17" r="11.6" fill="none" stroke="#566d92" stroke-width="0.8" />
+          <polygon points="17,8.2 19.3,14 25.4,14 20.5,17.7 22.4,23.6 17,20 11.6,23.6 13.5,17.7 8.6,14 14.7,14" fill="#ffffff" />
+        </svg>
+        <span class="findwrap">
           <input
             id="preset-search"
             type="text"
             placeholder="Load a preset: Deseret, New England, SoCal&hellip;"
             autocomplete="off"
             spellcheck="false"
+            data-hint="Type to search the built-in presets, then pick one to load it"
           />
           <div id="preset-menu" hidden></div>
+        </span>
+        <span class="tspring"></span>
+        <div id="wordmark">
+          <h1>STATE SIMULATOR</h1>
         </div>
-        <button id="new-state" class="btn btn-primary">New state</button>
-        <button id="carve" class="btn" aria-pressed="false" title="Draw a line across a county to split it along its census tracts">Carve</button>
-        <button id="reset" class="btn">Reset states</button>
       </header>
+      <div id="goldrule"></div>
 
       <main>
-        <div id="map-wrap">
+        <div id="map-col">
+          <div id="tabrow">
+            <span id="view-toggle">
+              <button id="view-atlas" class="tab active" data-hint="Political map of the current boundaries">Atlas</button>
+              <button id="view-data" class="tab" data-hint="Shade the map by the statistic selected under Rankings">Data</button>
+            </span>
+            <span class="tspring"></span>
+            <button id="new-state" class="btn" data-hint="Create a new state, then claim counties for it on the map">
+              <svg width="15" height="15" viewBox="0 0 15 15" aria-hidden="true">
+                <rect x="1" y="2.5" width="9.5" height="8" fill="#c8e6c1" stroke="#55657d" />
+                <rect x="8" y="7" width="6" height="6" fill="#fde2a7" stroke="#55657d" />
+                <path d="M11 8v4M9 10h4" stroke="#1d4ed8" stroke-width="1.4" />
+              </svg>
+              New State
+            </button>
+            <span class="tsep"></span>
+            <button id="carve" class="btn" aria-pressed="false" data-hint="Split a county along its census tracts by drawing a line across it">
+              <!-- One county sliced into two pieces along a diagonal cut. -->
+              <svg width="15" height="15" viewBox="0 0 15 15" aria-hidden="true">
+                <polygon points="1.5,2.5 9.5,2.5 3.5,12.5 1.5,12.5" fill="#c8e6c1" stroke="#55657d" />
+                <polygon points="11,2.5 13.5,2.5 13.5,12.5 5,12.5" fill="#fde2a7" stroke="#55657d" />
+              </svg>
+              Carve Tool
+            </button>
+            <button id="reset" class="btn" data-hint="Return every county to the state that holds it today">
+              <!-- A rotation arrow: a 270° arc from the top around to the
+                   left edge, with a solid head continuing the turn upward. -->
+              <svg width="15" height="15" viewBox="0 0 15 15" aria-hidden="true">
+                <path d="M8 3.5 A4.5 4.5 0 1 1 3.5 8" fill="none" stroke="#1d4ed8" stroke-width="1.6" />
+                <polygon points="1.2,8.6 5.8,8.6 3.5,4.9" fill="#1d4ed8" />
+              </svg>
+              Reset States
+            </button>
+            <button id="recolor" class="btn" data-hint="Re-deal every state's map color from a fresh shuffle; bordering states still never match">
+              <!-- Four palette tiles, in the map's own state fills. -->
+              <svg width="15" height="15" viewBox="0 0 15 15" aria-hidden="true">
+                <rect x="1.5" y="1.5" width="5.5" height="5.5" fill="#f8eba4" stroke="#55657d" />
+                <rect x="8" y="1.5" width="5.5" height="5.5" fill="#f8ccc9" stroke="#55657d" />
+                <rect x="1.5" y="8" width="5.5" height="5.5" fill="#d1ecb3" stroke="#55657d" />
+                <rect x="8" y="8" width="5.5" height="5.5" fill="#e1d2ec" stroke="#55657d" />
+              </svg>
+              Recolor
+            </button>
+            <span class="tsep"></span>
+            <button id="print" class="btn" data-hint="Print the current map and rankings">
+              <svg width="15" height="15" viewBox="0 0 15 15" aria-hidden="true">
+                <rect x="4" y="1.5" width="7" height="4" fill="#fff" stroke="#55657d" />
+                <rect x="1.5" y="5.5" width="12" height="5.5" fill="#d0d7e0" stroke="#55657d" />
+                <rect x="4" y="9" width="7" height="4.5" fill="#fff" stroke="#55657d" />
+                <path d="M5.5 10.8h4M5.5 12.3h4" stroke="#98a2b3" />
+              </svg>
+              Print
+            </button>
+          </div>
+          <div id="map-wrap">
             <canvas id="map-canvas"></canvas>
             <!-- The hover tint draws on its own canvas so a mouse move
                  repaints one county instead of the map's whole layer stack.
@@ -80,15 +138,11 @@
                    move is a cheap attribute write, not a deck rebuild. -->
               <g id="knife"><path class="knife-casing" /><path class="knife-line" /></g>
             </svg>
-            <div id="view-toggle">
-              <button id="view-atlas" class="active">Atlas</button>
-              <button id="view-data">Data</button>
-            </div>
-            <div id="map-legend" hidden></div>
+            <div id="map-legend" class="mapbox" hidden></div>
             <div id="paint-banner" hidden>
               Painting <b id="paint-name"></b>
               <span class="hint">click or drag to claim counties · click again or right-click to give back</span>
-              <button id="paint-discard" class="btn btn-small" title="Give back every county this state has claimed; a brand-new state is deleted">Discard</button>
+              <button id="paint-discard" class="btn btn-small" data-hint="Give back every county this state has claimed; a brand-new state is deleted">Discard</button>
               <button id="paint-done" class="btn btn-small">Done</button>
             </div>
             <div id="carve-banner" hidden>
@@ -98,127 +152,160 @@
                    straddle it; this asks for the old whole-tract behavior. The deck
                    fallback ONLY does whole tracts, so the choice is hidden there. -->
               <label class="hint" id="carve-intact-wrap" hidden><input type="checkbox" id="carve-intact" /> follow tract lines</label>
-              <button id="carve-undo" class="btn btn-small" title="Remove the last placed corner (right-click does the same)">Undo point</button>
+              <button id="carve-undo" class="btn btn-small" data-hint="Remove the last placed corner (right-click does the same)">Undo point</button>
               <button id="carve-done" class="btn btn-small">Done</button>
             </div>
             <!-- Transient notices (no tract data here, county rejoined, …) -->
             <div id="map-note" hidden></div>
-            <div id="map-tools">
-              <button id="reset-view" class="btn btn-small">Reset view</button>
-              <button id="inset-ak" class="btn btn-small" aria-pressed="false" title="Show the Alaska inset">Alaska</button>
-              <button id="inset-hi" class="btn btn-small" aria-pressed="false" title="Show the Hawaii inset">Hawaii</button>
+            <!-- The Alaska/Hawaii expanders: tabs on the bottom edge where
+                 the inset boxes open, like tray handles. -->
+            <div id="inset-tools">
+              <button id="inset-ak" class="tray-tab" aria-pressed="false" data-hint="Show or hide the Alaska inset">Alaska</button>
+              <button id="inset-hi" class="tray-tab" aria-pressed="false" data-hint="Show or hide the Hawaii inset">Hawaii</button>
             </div>
+            <button id="reset-view" class="btn btn-small" data-hint="Undo the pan and zoom and face the map home again">Reset view</button>
             <div id="tooltip" hidden></div>
           </div>
+        </div>
 
-        <!-- The state panel and the sidebar share this wrapper. On desktop it
-             is display: contents — the two lay out as grid items of <main>,
-             the panel as a horizontal bar under the map and the sidebar as a
-             full-height column beside both. On a phone the wrapper becomes a
-             bottom tray (Zillow-style): a fixed sheet with a grab handle that
-             peeks above the bottom edge and pulls up over the map. -->
+        <!-- The sidebar rides this wrapper. On desktop it is display:
+             contents — the sidebar lays out as a flex child of <main>, a
+             full-height column beside the map. On a phone the wrapper becomes
+             a bottom tray (Zillow-style): a fixed sheet with a grab handle
+             that peeks above the bottom edge and pulls up over the map. -->
         <div id="tray">
           <button id="tray-handle" type="button" aria-expanded="false">
             <i class="grabber"></i><span id="tray-peek">State details &amp; rankings</span>
           </button>
           <div id="tray-content">
-          <!-- Selected-state panel: a horizontal bar under the map, abutting
-               the sidebar, so the map viewport stays landscape like the
-               country it shows. -->
-          <div id="state-panel">
+          <aside id="sidebar">
+          <section class="box" id="statebox">
+            <h2 id="statebox-title">Selected State</h2>
+            <!-- With nothing selected, the card shows the whole union summed
+                 as if it were one state — same rows as the state card, minus
+                 the rank column (a total has no peers to rank against). -->
             <section id="empty-card">
-              <p>Click any state on the map to see its stats — then hit <b>New state</b> (or load a preset) and paint counties to redraw America.</p>
+              <div id="usa-meta"><span id="u-n"></span> counties</div>
+              <div class="stats">
+                <div class="srow"><span class="lbl">Population</span><span class="val"><b id="u-pop"></b></span></div>
+                <div class="srow"><span class="lbl">GDP</span><span class="val"><b id="u-gdp"></b></span></div>
+                <div class="srow"><span class="lbl">GDP per capita</span><span class="val"><b id="u-gdppc"></b></span></div>
+                <div class="srow"><span class="lbl">Median HH income</span><span class="val"><b id="u-mhi"></b></span></div>
+                <div class="srow"><span class="lbl">Bachelor's degree+</span><span class="val"><b id="u-bach"></b></span></div>
+                <div class="srow"><span class="lbl">Life expectancy</span><span class="val"><b id="u-life"></b></span></div>
+                <div class="srow"><span class="lbl">2024 president</span><span class="val"><span class="gauge" id="u-dial-margin"><i class="gd"></i><i class="gr"></i><b id="u-dial-needle"></b></span><b id="u-margin"></b></span></div>
+                <div class="srow"><span class="lbl">Electoral votes</span><span class="val"><b id="u-ev"></b></span></div>
+              </div>
+              <div class="race-wrap">
+                <div class="cap">Population by race</div>
+                <div class="race-grid"></div>
+                <div class="race-legend"></div>
+              </div>
+              <p>Click any state on the map to see its stats — then hit <b>New State</b> (or load a preset) and paint counties to redraw America.</p>
             </section>
 
             <section id="state-card" hidden>
-              <div class="panel-id">
-                <div class="card-top">
-                  <span class="dot-wrap">
-                    <button id="state-dot" class="dot" title="Change color"></button>
-                    <div id="color-menu" hidden></div>
-                  </span>
-                  <input id="state-name" class="state-name" spellcheck="false" />
-                </div>
-                <div class="panel-meta"><span id="v-n"></span> counties</div>
-                <div class="panel-actions">
-                  <button id="add-state" class="btn btn-primary" title="Admit this unit into the union as a US state" hidden>Add as US state</button>
-                  <button id="edit-borders" class="btn">Edit borders</button>
-                  <button id="copy-json" class="btn" title="Copy this state and its counties as JSON">Copy JSON</button>
-                  <button id="from-geojson" class="btn btn-quiet" hidden title="Paint this state from a GeoJSON boundary: whole counties inside it are claimed, counties it crosses are carved along census tracts">From GeoJSON&hellip;</button>
-                  <input id="geojson-file" type="file" accept=".json,.geojson,application/geo+json" hidden />
-                </div>
+              <div id="idrow">
+                <span class="dot-wrap">
+                  <button id="state-dot" class="dot" data-hint="Change this state's map color"></button>
+                  <div id="color-menu" hidden></div>
+                </span>
+                <input id="state-name" class="state-name" spellcheck="false" data-hint="Rename this state" />
+                <span class="flag-wrap">
+                  <button id="state-flag" class="flag-btn" data-hint="Change the country this state belongs to"></button>
+                  <div id="country-menu" hidden>
+                    <input id="country-search" type="text" placeholder="Search countries&hellip;" autocomplete="off" spellcheck="false" />
+                    <div id="country-list"></div>
+                  </div>
+                </span>
               </div>
-              <div class="panel-stats">
-                <div class="stat"><span class="stat-label">Population</span><b id="v-pop"></b><span class="stat-bar"><i id="b-pop"></i></span><span id="r-pop" class="rank-chip"></span></div>
-                <div class="stat"><span class="stat-label">GDP</span><b id="v-gdp"></b><span class="stat-bar"><i id="b-gdp"></i></span><span id="r-gdp" class="rank-chip"></span></div>
-                <div class="stat"><span class="stat-label">GDP per capita</span><b id="v-gdppc"></b><span class="stat-bar"><i id="b-gdppc"></i></span><span id="r-gdppc" class="rank-chip"></span></div>
-                <div class="stat"><span class="stat-label">Median HH income</span><b id="v-mhi"></b><span class="stat-bar"><i id="b-mhi"></i></span><span id="r-mhi" class="rank-chip"></span></div>
-                <div class="stat"><span class="stat-label">Bachelor's degree+</span><b id="v-bach"></b><span class="stat-bar"><i id="b-bach"></i></span><span id="r-bach" class="rank-chip"></span></div>
-                <div class="stat"><span class="stat-label">Life expectancy</span><b id="v-life"></b><span class="stat-bar"><i id="b-life"></i></span><span id="r-life" class="rank-chip"></span></div>
-                <div class="stat"><span class="stat-label">2024 president</span><b id="v-margin"></b>
-                  <!-- Lean dial: the band spans D+30 (left) to R+30 (right);
-                       the needle clamps at the ends. -->
-                  <svg id="dial-margin" class="stat-dial" viewBox="0 0 52 28" aria-hidden="true">
-                    <path d="M 1 27 A 25 25 0 0 1 26 2 L 26 9 A 18 18 0 0 0 8 27 Z" fill="#5b8ed6" fill-opacity=".35"/>
-                    <path d="M 26 2 A 25 25 0 0 1 51 27 L 44 27 A 18 18 0 0 0 26 9 Z" fill="#d66a5b" fill-opacity=".35"/>
-                    <line x1="26" y1="2" x2="26" y2="9" stroke="#fff"/>
-                    <line id="dial-needle" x1="26" y1="27" x2="26" y2="3.5" stroke="#111" stroke-width="2"/>
-                    <circle cx="26" cy="27" r="2.2" fill="#111"/>
-                  </svg>
-                  <span id="r-margin" class="rank-chip"></span></div>
-                <div class="stat"><span class="stat-label">House seats</span><b id="v-seats"></b><span id="d-seats" class="stat-dots"></span><span class="rank-chip"></span></div>
-                <div class="stat"><span class="stat-label">Electoral votes</span><b id="v-ev"></b><span id="d-ev" class="stat-dots"></span><span id="r-ev" class="rank-chip"></span></div>
+              <div id="meta"><span id="v-n"></span> counties</div>
+              <div class="stats">
+                <div class="srow"><span class="lbl">Population</span><span class="val"><b id="v-pop"></b></span><span class="rk" id="r-pop"></span></div>
+                <div class="srow"><span class="lbl">GDP</span><span class="val"><b id="v-gdp"></b></span><span class="rk" id="r-gdp"></span></div>
+                <div class="srow"><span class="lbl">GDP per capita</span><span class="val"><b id="v-gdppc"></b></span><span class="rk" id="r-gdppc"></span></div>
+                <div class="srow"><span class="lbl">Median HH income</span><span class="val"><b id="v-mhi"></b></span><span class="rk" id="r-mhi"></span></div>
+                <div class="srow"><span class="lbl">Bachelor's degree+</span><span class="val"><b id="v-bach"></b></span><span class="rk" id="r-bach"></span></div>
+                <div class="srow"><span class="lbl">Life expectancy</span><span class="val"><b id="v-life"></b></span><span class="rk" id="r-life"></span></div>
+                <!-- Lean gauge: the band spans D+30 (left) to R+30 (right);
+                     the needle clamps at the ends (positioned from main.js). -->
+                <div class="srow"><span class="lbl">2024 president</span><span class="val"><span class="gauge" id="v-dial-margin"><i class="gd"></i><i class="gr"></i><b id="v-dial-needle"></b></span><b id="v-margin"></b></span><span class="rk" id="r-margin"></span></div>
+                <div class="srow"><span class="lbl">Electoral votes</span><span class="val"><span id="d-ev" class="stat-dots"></span><b id="v-ev"></b></span><span class="rk" id="r-ev"></span></div>
               </div>
-              <div id="race-wrap">
-                <div id="race-grid"></div>
-                <div id="race-legend"></div>
+              <div class="race-wrap">
+                <div class="cap">Population by race</div>
+                <div class="race-grid"></div>
+                <div class="race-legend"></div>
+              </div>
+              <div id="actions">
+                <button id="edit-borders" class="btn" data-hint="Claim or release counties for this state on the map">Edit borders</button>
+                <button id="copy-json" class="btn" data-hint="Copy this state and its county list as JSON">Copy JSON</button>
+                <button id="from-geojson" class="btn" hidden data-hint="Paint this state from a GeoJSON boundary: whole counties inside it are claimed, counties it crosses are carved along census tracts">From GeoJSON&hellip;</button>
+                <input id="geojson-file" type="file" accept=".json,.geojson,application/geo+json" hidden />
               </div>
             </section>
-          </div>
-
-          <aside id="sidebar">
-          <section id="elections" class="card">
-            <h2 class="mini-head">If the 2024 vote elected the president</h2>
-            <div class="e-row">
-              <span class="e-label">President</span>
-              <span class="e-d" id="e-pres-d"></span>
-              <div class="ebar" id="e-pres-bar"><i class="ed"></i><i class="ex"></i><i class="er"></i></div>
-              <span class="e-r" id="e-pres-r"></span>
-            </div>
-            <p class="e-note">
-              Winner-take-all per state.
-              Electoral votes follow the 435 House seats reapportioned to this map, plus 2 per state; DC keeps 3.
-            </p>
           </section>
 
-          <section id="rankings" class="card">
-            <div class="rank-head">
-              <h2 class="mini-head">Rankings</h2>
-              <select id="rank-stat">
-                <option value="pop">Population</option>
-                <option value="landArea">Land area</option>
-                <option value="gdp">GDP</option>
-                <option value="gdppc">GDP per capita</option>
-                <option value="mhi">Median HH income</option>
-                <option value="bach">Bachelor's degree+</option>
-                <option value="life">Life expectancy</option>
-                <option value="margin">2024 margin (D&ndash;R)</option>
-                <option value="ev">Electoral votes</option>
-                <option value="wht">% White</option>
-                <option value="blk">% Black</option>
-                <option value="hsp">% Hispanic</option>
-                <option value="asn">% Asian</option>
-                <option value="nat">% Native</option>
-              </select>
+          <section class="box" id="elections">
+            <h2>Electoral College <span class="aux">2024 vote, this map</span></h2>
+            <div id="ebox">
+              <div id="erow">
+                <span class="ecap d" id="e-pres-d"></span>
+                <div class="ebar" id="e-pres-bar"><i class="ed"></i><i class="ex"></i><i class="er"></i></div>
+                <span class="ecap r" id="e-pres-r"></span>
+              </div>
+              <p class="e-note">
+                Winner-take-all per state.
+                Electoral votes follow the 435 House seats reapportioned to this map, plus 2 per state; DC keeps 3.
+              </p>
+            </div>
+          </section>
+
+          <section class="box" id="rankings">
+            <h2>Rankings
+              <span class="aux">
+                <select id="rank-stat" data-hint="Statistic to rank the states by — the Data view shades the map by it too">
+                  <option value="pop">Population</option>
+                  <option value="landArea">Land area</option>
+                  <option value="gdp">GDP</option>
+                  <option value="gdppc">GDP per capita</option>
+                  <option value="mhi">Median HH income</option>
+                  <option value="bach">Bachelor's degree+</option>
+                  <option value="life">Life expectancy</option>
+                  <option value="margin">2024 margin (D&ndash;R)</option>
+                  <option value="ev">Electoral votes</option>
+                  <option value="wht">% White</option>
+                  <option value="blk">% Black</option>
+                  <option value="hsp">% Hispanic</option>
+                  <option value="asn">% Asian</option>
+                  <option value="nat">% Native</option>
+                </select>
+              </span>
+            </h2>
+            <div id="lvhead">
+              <span class="c-pos">#</span><span class="c-chg">&Delta;</span><span class="c-sw"></span><span class="c-nm">State</span><span class="c-bar"></span><span class="c-val">Value</span>
             </div>
             <ol id="rank-list"></ol>
           </section>
-
-          <footer id="sources"></footer>
           </aside>
           </div>
         </div>
       </main>
+
+      <div id="statusbar">
+        <span class="cell grow" id="status-msg">Ready</span>
+        <span class="cell" id="status-units"></span>
+        <span class="cell"><a href="#" id="src-link" data-hint="Where every figure comes from">Data Sources</a></span>
+        <!-- Camera readout: the lat/lon under the centre of the viewport and
+             the zoom factor. globe/map.js writes it from the draw loop. -->
+        <span class="cell mono" id="map-debug"></span>
+      </div>
+
+      <div id="srcdlg" hidden>
+        <div class="dlg-title">Data Sources <button id="src-x" title="Close">&times;</button></div>
+        <div class="dlg-body" id="sources"></div>
+        <div class="dlg-foot"><button class="btn" id="src-ok">OK</button></div>
+      </div>
     </div>
     <script type="module" src="/src/main.js"></script>
   </body>

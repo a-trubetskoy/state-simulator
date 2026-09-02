@@ -16,52 +16,142 @@
 // range to appear over, so a layer can be absent at a wide view and ordinary at
 // a close one. The river tiers are what it exists for.
 //
+//   showWhenSelected  suspends that fade for the part of a layer that belongs
+//                     to the SELECTED state, and only that part: those features
+//                     draw at full strength whatever the zoom while the rest of
+//                     the map keeps the fade. Only the cities use it, and the
+//                     reason is in their entry at the foot of this file.
+//
 // Anything that depends on WHO OWNS the ground — the band, the state borders,
 // the selection outline — is not a switch here at all. Those read the per-unit
 // attribute table in the shader (see UNIT_ATTR in shaders.js), so painting a
 // county restyles them without touching this list.
 
-const rgba = (hex, a = 255) => [
-  parseInt(hex.slice(1, 3), 16) / 255,
-  parseInt(hex.slice(3, 5), 16) / 255,
-  parseInt(hex.slice(5, 7), 16) / 255,
-  a / 255,
-];
+import {
+  BAND_WIDTH,
+  COAST,
+  COUNTRY_LINE,
+  COUNTY_LINE,
+  FOREIGN_LAND,
+  GRATICULE_LINE,
+  GREY_LAND,
+  HALO,
+  HOVER,
+  KNIFE,
+  LAKE,
+  LAND,
+  NO_DATA,
+  OCEAN,
+  OUTLINE_FALLBACK,
+  STATE_LINE,
+  WHITE,
+  WORLD_LAND,
+} from "../palette.js";
+
+export { BAND_WIDTH };
+
+// palette.js is the one place a colour is defined — both renderers read it, so
+// the parity this file documents cannot drift shade by shade. It speaks
+// deck.gl's 0-255 bytes; the GL pipeline here wants 0-1 floats.
+const f = ([r, g, b, a]) => [r / 255, g / 255, b / 255, a / 255];
 
 // Named for the thing each one paints, not for the constant it came from.
-// main.js has both a WORLD_LAND (the tan the scenery wears, shared with a
+// palette.js has both a WORLD_LAND (the tan the scenery wears, shared with a
 // non-union unit) and a LAND (the dark line along a land border beyond the
 // map's units); reading the second for the first turned every continent
 // outside North America into a slate-grey void, which is what the names below
 // exist to prevent.
 export const COLORS = {
-  sphere: rgba("#e8f1f7"), //     main.js OCEAN
-  worldLand: rgba("#faf7f1"), //  main.js WORLD_LAND = FOREIGN_FILL
-  borderLine: rgba("#5b6472"), // main.js LAND
-  lake: rgba("#d5e8f4"),
-  halo: rgba("#cde4f2"),
-  coast: rgba("#8ab8d6"),
-  countyLine: rgba("#ffffff", 128),
-  stateLine: rgba("#999999"),
-  graticule: rgba("#b9cfdf", 150),
-  nation: rgba("#ffffff"),
-  white: rgba("#ffffff"),
+  sphere: f(OCEAN),
+  worldLand: f(WORLD_LAND),
+  borderLine: f(LAND),
+  lake: f(LAKE),
+  halo: f(HALO),
+  coast: f(COAST),
+  countyLine: f(COUNTY_LINE),
+  stateLine: f(STATE_LINE),
+  countryLine: f(COUNTRY_LINE), // borders between OTHER countries, in the world scenery
+  graticule: f(GRATICULE_LINE),
+  nation: f(WHITE),
+  white: f(WHITE),
   // Data view: the ground carries no colour of its own, non-union units keep a
   // pale wash of the atlas tan, and a state with no reading goes grey.
-  greyLand: rgba("#e4e4e4"),
-  noData: rgba("#cccccc"),
-  foreignLand: rgba("#f4f0e9"),
+  greyLand: f(GREY_LAND),
+  noData: f(NO_DATA),
+  foreignLand: f(FOREIGN_LAND),
   // 7% black over the county under the pointer, composited over the finished
-  // map — main.js's HOVER, which is the same 0.93 multiply the overlay used.
-  hover: [0, 0, 0, 18 / 255],
+  // map — the same 0.93 multiply the overlay used.
+  hover: f(HOVER),
   // The carve stroke in flight, over the presented scene.
-  knife: rgba("#e53e3e", 235),
+  knife: f(KNIFE),
   // Fallback for the selection outline before a state is picked; the real
   // colour is the selected state's own fill pushed darker, set per frame.
-  outline: rgba("#333333"),
+  outline: f(OUTLINE_FALLBACK),
 };
 
-export const BAND_WIDTH = 10; // css px across the border, so five to a side
+// How far in a zoom range has come: 0 below it, 1 above it, a straight ramp
+// across it. Read off d3.zoom's own scale factor — the number the user turns —
+// rather than off a pixel radius, so a layer arrives at the same zoom whatever
+// size the window is.
+export const rampAt = (k, [k0, k1]) => Math.max(0, Math.min(1, (k - k0) / (k1 - k0)));
+
+// The zooms the cities arrive over. Early, because the biggest of them are
+// continental landmarks rather than local detail: at a whole-continent view a
+// dozen dots for Chicago, Mexico City and Toronto tell you where you are
+// looking, and cities.js's own rank cut is what keeps it to a dozen.
+//
+// It ENDS at 2, where cities.js's rank cut still admits nothing past rank 1.
+// That gives the 68 largest cities in the world a zoom of their own, at full
+// ink, before rank 2 arrives at 3.5. Ending the fade at 3.5 instead put the
+// two events on the same zoom, so the biggest cities were still coming up out
+// of the paper at the moment the next tier landed on top of them — they were
+// never once the only thing on the map.
+export const CITY_FADE = [1, 2];
+
+// A SEPARATE range from CITY_FADE, and a later one. The state labels give way
+// once the city names are dense enough to have taken over the job of saying
+// what is on the ground, not the moment the first dot appears — tying the two
+// together would pull the atlas type down at zoom 2, where it is still the only
+// thing naming anything.
+//
+// It starts at 4, about a state's width: by then several city names are on the
+// ground in every state on screen, and a name stretched across the whole of one
+// has stopped being read as a label and started being read as something lying
+// over the map. It reaches the floor at 9, which is where this range used to
+// begin — so the atlas type is at its palest by a county-scale view rather than
+// only at the very end of the zoom.
+export const STATE_LABEL_FADE = [4, 9];
+
+// What the map's own state labels fall to across that range. The two label
+// sets compete for the same ground, and by those zooms the atlas type has
+// stopped being the thing you are reading: a name set to span a whole state
+// is, at a county-sized view, a pale word lying across everything. It fades
+// rather than going out, because it is still the answer to "which state am I
+// in" — a question a city name does not answer.
+export const STATE_LABEL_DIM = 0.22;
+
+// Where the county hairline stops drawing the thinned boundary and starts
+// drawing the full one. Below this, a border that follows a river packs several
+// vertices into a pixel and the blended capsules stack into a band a couple of
+// pixels wide and near-solid white, while a survey-line border a county away
+// stays a hairline — so the same kind of line reads as two different weights.
+// The compiler ships a second copy of the boundary thinned to 2 km for these
+// zooms; see COARSE_TOLERANCE_KM in scripts/build-geometry.mjs.
+//
+// 2 is a step above where the effect is first objectionable, so the whole of
+// the range it shows in is covered. The swap is a hard one rather than a fade,
+// and that is the point: a fade draws both tiers at once, and two copies of one
+// border at half alpha each pile up into exactly the extra weight the coarse
+// tier exists to remove. It does not flash, because the two tiers differ by
+// less than the width of the line that moves — at this zoom no point of the
+// thinned boundary is more than 0.85 px from the full one and half of them are
+// within 0.32 px, measuring in design-box units at k=1 the way the m/px figure
+// in camera.js does, so on a window that fits the box at 1.3x it is a little
+// over a pixel at worst.
+//
+// Raising it covers more zooms and makes the swap more visible; the tolerance
+// and this number trade against each other and want tuning together.
+export const COARSE_ZOOM = 2;
 
 // How the river tiers thicken as the view closes in: from their nominal width
 // at zoom 4, where the first tier has just arrived, to 6x it at 16, the closest
@@ -112,6 +202,33 @@ export function buildLayers() {
   });
   const fill = (group, color, extra = {}) => ({ kind: "fill", group, color, ...extra });
 
+  // The county hairline, as a pair of layers that differ only in which copy of
+  // the boundary they draw and which side of COARSE_ZOOM they draw it on. One
+  // style, written once, so the two tiers cannot drift apart in colour or
+  // width — which would turn the swap from invisible into a flash.
+  const mapLines = () => {
+    const style = {
+      skipEqual: true,
+      carved: true,
+      tier: "map lines",
+      mode: MODE.arcs,
+      colorB: COLORS.stateLine,
+      dataColor: [0, 0, 0, 0],
+    };
+    return [
+      line(["countyArcsCoarse", "seamsCoarse"], COLORS.countyLine, 1, {
+        ...style,
+        name: "map lines (wide views)",
+        zoom: [null, COARSE_ZOOM],
+      }),
+      line(["countyArcs", "seams"], COLORS.countyLine, 1, {
+        ...style,
+        name: "map lines",
+        zoom: [COARSE_ZOOM, null],
+      }),
+    ];
+  };
+
   return [
     // Globe furniture, under everything. Without them the scene clears to the
     // page white.
@@ -124,7 +241,17 @@ export function buildLayers() {
     // seam shows.
     line("worldCoast", COLORS.halo, 16, { name: "world coast halo", hideInData: true }),
     fill("worldLand", COLORS.worldLand, { dataColor: COLORS.foreignLand }),
-    line("worldBorders", COLORS.countyLine, 1, { hideInData: true }),
+    // Solid, not dotted. An atlas dots a national boundary to tell it from a
+    // coastline, and it was tried here — but a dash needs a phase that runs the
+    // length of the border, and a line instance only knows its own segment. The
+    // border segments are shorter than any useful dot spacing at the zooms this
+    // layer is seen at (median 0.40 px at the globe fit, 1.91 px at the home
+    // view, against a 5 px period), so a per-segment phase restarts inside every
+    // dot and the pattern closes up into a solid line anyway — with a smear at
+    // the close zooms where the segments do get long enough to break. Dots here
+    // would mean a per-instance arc length baked into the geometry; the colour
+    // already separates a border from a shoreline, which is the job.
+    line("worldBorders", COLORS.countryLine, 1, { hideInData: true }),
     line("worldCoast", COLORS.coast, 1.1, { name: "world coast line" }),
 
     // --- the map
@@ -151,20 +278,25 @@ export function buildLayers() {
     // of the coast's segments, because a quad perpendicular to one segment knows
     // nothing about where the unit goes next.
     { kind: "band", name: "band", group: "counties", width: BAND_WIDTH, hideInData: true },
-    // One layer, two groups, two colours: a state border wears grey and every
-    // other arc the white hairline, decided per instance from the unit pair. A
+    // One layer, two groups, two colours: a state border wears the full grey
+    // and every other arc the faint hairline, decided per instance from the
+    // unit pair. A
     // seam is a state border that happens to come from a second source, so it
     // belongs here beside the shared county arcs. In the data view the hairline
     // goes to zero alpha — county lines do not exist there — and the shader
     // drops those instances outright.
-    line(["countyArcs", "seams"], COLORS.countyLine, 1, {
-      skipEqual: true,
-      carved: true,
-      name: "map lines",
-      mode: MODE.arcs,
-      colorB: COLORS.stateLine,
-      dataColor: [0, 0, 0, 0],
-    }),
+    //
+    // Written twice, at two levels of detail, because this is the one layer
+    // narrow enough for the boundary's own roughness to show as extra width:
+    // see COARSE_ZOOM above. `tier` marks the two as one layer, and the check
+    // holds their zoom ranges to meeting exactly — a gap there is a zoom with
+    // no county lines at all, and an overlap is both tiers drawn over each
+    // other, which is the fault this exists to fix.
+    //
+    // The nearest thing in main.js is a single deck.gl PathLayer over the full
+    // detail, so the parity this file documents holds above COARSE_ZOOM and is
+    // deliberately broken below it.
+    ...mapLines(),
     // Rivers, over the ground and under every edge of the water they run into.
     // Above the county fills and the border band, because a river is a fact
     // about the ground and breaking it wherever a state line happens to fall
@@ -176,8 +308,8 @@ export function buildLayers() {
     // is read by colour and a thread across it is only clutter.
     //
     // Four tiers, coarsest first, each fading in over a stretch of the zoom.
-    // Drawing all of them at every zoom is right at no zoom at all: 1,214 lines
-    // over a whole globe is a haze, and the same 1,214 is thin once the view is
+    // Drawing all of them at every zoom is right at no zoom at all: 5,236 lines
+    // over a whole globe is a haze, and the same 5,236 is thin once the view is
     // down to a few counties. build-world.mjs decides what falls in each tier;
     // this is where they appear.
     //
@@ -197,10 +329,13 @@ export function buildLayers() {
     // zooms, so each step in brings one kind of water and then the other instead
     // of doubling the map's detail at a stroke.
     //
-    // Width tapers with the tier. Natural Earth's 10m river file carries no
-    // stroke weight of its own, but the tiers ARE one, and a Mississippi
-    // heavier than a creek does more for legibility than the filtering does.
-    // The whole taper then thickens with the zoom, by RIVER_GROW above.
+    // Width tapers with the tier. Natural Earth's world river file carries no
+    // stroke weight of its own — only its North America supplement does, and
+    // build-world.mjs spends that on deciding which tier a river lands in
+    // rather than on how wide it draws — but the tiers ARE a weight, and a
+    // Mississippi heavier than a creek does more for legibility than the
+    // filtering does. The whole taper then thickens with the zoom, by
+    // RIVER_GROW above.
     line("rivers1", COLORS.coast, 1, {
       name: "rivers major",
       hideInData: true,
@@ -293,5 +428,40 @@ export function buildLayers() {
       mode: MODE.outline,
       role: "selection",
     }),
+    // CITIES: a dot on each town and its name, from Natural Earth by way of
+    // cities.js, with the state capital's name underlined. Last in the list, so
+    // they sit over every fill, band, river and hairline on the map — a name
+    // with a river ruled through it is the one thing a label may not be.
+    //
+    // They are drawn rather than taken from a tile server because no free sheet
+    // is cities alone: Esri's are either names with no dot, or dots fused into
+    // one image with state labels and country boundaries this map already draws
+    // for itself. See the head of cities.js.
+    //
+    // Full alpha under the fade: a name is either legible or it is clutter.
+    // Only the map's own state labels go above these, and those give way on a
+    // later range of their own — see STATE_LABEL_FADE.
+    //
+    // Selecting a state suspends the fade INSIDE that state. The fade answers
+    // "is the view close enough for towns to mean anything", and a selection
+    // answers it instead for the state asked about: that state is about places
+    // now, at whatever zoom the question was asked from. Without this the
+    // selected state's own capital — which cities.js draws whatever the zoom —
+    // would be drawn at alpha zero at the home view, which is where a state is
+    // most often picked.
+    //
+    // Inside that state and nowhere else, which is the whole of why the alpha
+    // is two numbers rather than one. Lifting the layer's own fade instead
+    // brought every city in the world up out of the paper the moment a state
+    // was picked at the home view: asked about Texas, the map answered with San
+    // Francisco and Chicago.
+    {
+      kind: "cities",
+      name: "cities",
+      color: [1, 1, 1, 1],
+      fadeIn: CITY_FADE,
+      showWhenSelected: true,
+      hideInData: true,
+    },
   ];
 }

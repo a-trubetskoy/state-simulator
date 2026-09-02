@@ -57,6 +57,7 @@ bool isUnit(uint u) { return u < UNIT_NONE; }
 //
 //   r, g   the state's index, low byte first
 //   b      flags: 1 outside the union, 2 in the selected state
+//   a      the state's country, as a dense index (paintGlobe assigns them)
 //
 // The line shader needs this and the fill shader does not, and the reason is
 // the whole point of the table. A fill asks one question about one unit and the
@@ -75,10 +76,11 @@ struct Owner {
   int state;   // which state holds it
   bool alien;  // that state is outside the union
   bool chosen; // that state is the selected one
+  int country; // which country that state flies the flag of
 };
 
 Owner ownerOf(uint unit) {
-  Owner o = Owner(false, -1, false, false);
+  Owner o = Owner(false, -1, false, false, -1);
   if (!isUnit(unit)) return o;
   int i = int(unit);
   vec4 t = texelFetch(uAttr, ivec2(i % uAttrWidth, i / uAttrWidth), 0);
@@ -89,6 +91,7 @@ Owner ownerOf(uint unit) {
   o.state = int(r | (g << 8u));
   o.alien = (b & 1u) != 0u;
   o.chosen = (b & 2u) != 0u;
+  o.country = int(t.a * 255.0 + 0.5);
   return o;
 }
 `;
@@ -245,8 +248,16 @@ void main() {
     bool ownAlien = l.unit ? l.alien : r.alien;
     bool ownChosen = l.unit ? l.chosen : r.chosen;
     bool split = interior && l.state != r.state && !(l.alien && r.alien);
+    // The one thing two units outside the union do NOT agree about. They wear
+    // one tan and read as context rather than as states, so no band and no
+    // outline runs between them — but where they belong to different
+    // COUNTRIES, the line between them is an international border, and the
+    // world scenery behind the map draws its own in this same grey. Without
+    // this, Mexico and Guatemala are divided by the same faint hairline that
+    // separates two Mexican states, while France and Spain are not.
+    bool foreignBorder = interior && l.alien && r.alien && l.country != r.country;
     if (uMode == MODE_ARCS) {
-      vColor = split ? uColorB : uColor;
+      vColor = (split || foreignBorder) ? uColorB : uColor;
     } else if (uMode == MODE_BAND) {
       cull = !(interior ? split : edge && !ownAlien);
     } else {
@@ -343,6 +354,53 @@ void main() {
 // the borders into the stencil and redraws the county fills through it, which
 // keeps the pixel width and makes the spill impossible rather than rare. The
 // left/right pair is still what picks which borders to stroke.
+
+// --------------------------------------------------------------- city dots
+//
+// One instanced quad per city, sized in DEVICE PX rather than in ground units.
+// A city dot is a map symbol and not a thing on the ground: it means "a town is
+// here", which is as true and as legible at one zoom as another. The state
+// names above are the opposite case and scale with their territory, because
+// they are lettering painted onto the ground.
+//
+// aPos carries the unit-sphere position in xyz and the dot's radius in w, so a
+// tier can be dotted smaller than the one above it without a second attribute.
+export const DOT_VS = `#version 300 es
+precision highp float;
+${CAMERA}
+
+in vec2 aCorner;          // 0..1 across the quad
+in vec4 aPos;             // xyz on the unit sphere, w the radius in device px
+
+out vec2 vOff;            // -1..1 from the centre, so length() is the circle
+out float vFront;
+
+void main() {
+  vec3 p = uRot * aPos.xyz;
+  vFront = p.x;
+  vOff = aCorner * 2.0 - 1.0;
+  gl_Position = toClip(project(p) + vOff * aPos.w);
+}`;
+
+export const DOT_FS = `#version 300 es
+precision highp float;
+in vec2 vOff;
+in float vFront;
+uniform vec4 uColor;
+out vec4 fragColor;
+void main() {
+  // A dot is a few px across, so the horizon gets a hard cut rather than the
+  // antialiased one the fills use: there is no room on a dot for a ramp, and a
+  // city on the limb is either in view or it is not.
+  if (vFront <= 0.0) discard;
+  float d = length(vOff);
+  // fwidth of a quantity that runs 0..1 over the radius IS one device pixel in
+  // those units, so the rim gets the same one-pixel ramp at every dot size.
+  float aa = max(fwidth(d), 1e-5);
+  float a = 1.0 - smoothstep(1.0 - aa, 1.0, d);
+  if (a <= 0.0) discard;
+  fragColor = vec4(uColor.rgb, uColor.a * a);
+}`;
 
 // ------------------------------------------------------------------ present
 //

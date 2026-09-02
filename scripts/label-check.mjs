@@ -315,8 +315,8 @@ if (!labels.length) fail("no labels at all");
   if (!(rms.cov < rms.bin / 3))
     fail(`coverage seeding barely beats thresholding (${rms.cov.toFixed(3)} vs ${rms.bin.toFixed(3)})`);
 
-  // A stem, because that is where the reader meets the error. A Verdana capital
-  // stem is about 0.1 em, so four texels at EM 64, and it has to measure four
+  // A stem, because that is where the reader meets the error. A capital's main
+  // stem is around 0.1 em, so four texels at EM 64, and it has to measure four
   // wherever it happens to fall between texel centres.
   let worstStem = 0;
   for (const shift of [0, 0.2, 0.4, 0.6, 0.8]) {

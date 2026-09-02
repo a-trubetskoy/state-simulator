@@ -29,8 +29,9 @@
 // than two pipelines that have to be kept looking alike.
 //
 // Source: Natural Earth 10m admin-0, 10m lakes and 10m rivers (the first two
-// are downloads build-data.mjs already caches), plus TIGER area hydrography
-// for the water Natural Earth files as coastal (CENSUS_LAKES in geo-lib.mjs).
+// are downloads build-data.mjs already caches), the 10m North America rivers
+// supplement, plus TIGER area hydrography for the water Natural Earth files as
+// coastal (CENSUS_LAKES in geo-lib.mjs).
 // The land is simplified far harder than the map is, since it is only ever
 // read at continental zoom; the lakes and rivers are not, since they are read
 // at every zoom the map has.
@@ -86,6 +87,16 @@ const LAKES_CACHE = "ne_10m_lakes.zip";
 const RIVERS =
   "https://naturalearth.s3.amazonaws.com/10m_physical/ne_10m_rivers_lake_centerlines.zip";
 const RIVERS_CACHE = "ne_10m_rivers_lake_centerlines.zip";
+// Natural Earth publishes its rivers as a world file plus a per-continent
+// supplement, and the world file alone is thin over North America: it draws the
+// Rio Grande and the Brazos and no Colorado through Austin, no Trinity, no
+// Guadalupe, no Nueces. The supplement is the rest of the continent, 4,022
+// lines that are all but disjoint from the world file — exactly one of them
+// (Nipigon) traces a course the world file already has, so the two go in
+// side by side with no merge to do.
+const RIVERS_NA =
+  "https://naturalearth.s3.amazonaws.com/10m_physical/ne_10m_rivers_north_america.zip";
+const RIVERS_NA_CACHE = "ne_10m_rivers_north_america.zip";
 
 const EARTH_RADIUS_KM = 6371;
 // The map itself is generalized at 1.6 km. This is background: 6 km is under a
@@ -120,11 +131,35 @@ const RIVER_MIN_WEIGHT = (RIVER_SIMPLIFY_METRES / 1000) ** 2 / 2 / EARTH_RADIUS_
 // compiles them into line groups in this order and the renderer's layer table
 // names them in it, so a tier is never drawn without every coarser tier under
 // it.
+//
+// The supplement needs its own axis, because its scalerank is not the world
+// file's. Every line in it is ranked 10 to 12 — the file is what Natural Earth
+// adds ON TOP of a world map already drawn, so its ranks say "finer than the
+// world file" and nothing about how one supplement river compares to another.
+// Taken at face value they would put the Colorado through Austin in the same
+// bin as a creek, and both of them below every rank-9 line on Earth.
+//
+// What the supplement has instead is strokeweig, the width Natural Earth draws
+// each line at, which the world file does not carry. It is a real editorial
+// ordering and a coarse one — 0.15, 0.2, 0.25, 0.3 — and its top two classes
+// are the rivers a reader would name: the Colorado, Trinity, Guadalupe, Nueces,
+// Neches, Ouachita, Cimarron, Niobrara, Penobscot, Kootenay. Those go in with
+// the world file's rank 5-6, which is where the Brazos beside them already is.
+// The rest of rank 10 goes with rank 7, and ranks 11-12 are the finest tier.
+//
+// takesNa is asked about a river SYSTEM rather than a line — see naSystems
+// below. Natural Earth cuts the supplement at every lake and at some junctions,
+// so the Colorado arrives as three reaches whose weights differ, and a per-line
+// cut would draw it from the Gulf to Austin and stop there for two zoom steps
+// while its upper 700 km waited for a later tier. Half the length of the heavy
+// rivers sits on lighter reaches like that, so the whole system takes the tier
+// its heaviest reach earns and arrives as one river.
+const NA_HEAVY = 0.25;
 const RIVER_TIERS = [
-  { name: "rivers1", maxRank: 4 },
-  { name: "rivers2", maxRank: 6 },
-  { name: "rivers3", maxRank: 7 },
-  { name: "rivers4", maxRank: Infinity },
+  { name: "rivers1", maxRank: 4, takesNa: () => false },
+  { name: "rivers2", maxRank: 6, takesNa: (sys) => sys.weight >= NA_HEAVY },
+  { name: "rivers3", maxRank: 7, takesNa: (sys) => sys.rank <= 10 },
+  { name: "rivers4", maxRank: Infinity, takesNa: () => true },
 ];
 
 // Lakes tier the same way and for the same reason: 1,346 of them at a whole-
@@ -227,17 +262,20 @@ const GREAT_LAKES = new Set([
   "Lake Saint Clair",
 ]);
 const lakes = [];
-let greatLakesDropped = 0;
+// The Great Lakes are left to the map, but their outlines are kept aside rather
+// than thrown away: the rivers below have to know where the map draws water,
+// and this is the only place in this file that sees it.
+const greatLakes = [];
 for (const f of lakeFc.features) {
   if (!f.geometry?.coordinates?.length) continue;
   const name = neClean(f.properties.name);
   if (GREAT_LAKES.has(name)) {
-    greatLakesDropped++;
+    greatLakes.push({ type: "Feature", properties: { name }, geometry: f.geometry });
     continue;
   }
   lakes.push({ type: "Feature", properties: { name }, geometry: f.geometry });
 }
-console.log(`world lakes: ${greatLakesDropped} Great Lakes features left to the map's own shoreline`);
+console.log(`world lakes: ${greatLakes.length} Great Lakes features left to the map's own shoreline`);
 const neLakeCount = lakes.length;
 
 // The renderer draws this group over the county fills, so it is this file —
@@ -440,22 +478,104 @@ for (const f of land.features) f.properties = { name: f.properties.name };
 
 // ------------------------------------------------------------------- rivers
 //
-// Natural Earth's 10m rivers file carries two kinds of line under one cover:
-// real rivers, and "lake centerlines" — the synthetic thread it runs through a
-// lake so that a river system reads as continuous on a small-scale map. The
-// centerlines are dropped. This map draws its lakes as water at full detail,
-// and a centerline over one is a blue line down the middle of a blue lake: the
-// St. Lawrence would appear to run straight across Lake Ontario. Here a river
-// meeting a lake simply ends at the shore, which is what a river does.
+// Natural Earth's river files carry two kinds of line under one cover: real
+// rivers, and "lake centerlines" — the synthetic thread it runs through a lake
+// so that a river system reads as continuous on a small-scale map. Whether a
+// centerline belongs here is a question about the lake it crosses, and it has
+// opposite answers either side of that.
+//
+// Over a lake the map draws, a centerline is a blue line down the middle of a
+// blue lake, and the St. Lawrence would run straight across Lake Ontario.
+// Where no lake is drawn it is the only thing keeping the river whole. Natural
+// Earth's lake file has most of the world's reservoirs missing, so the Colorado
+// through Austin meets Lake Buchanan and Lake Travis as 20 km and 57 km of
+// nothing at all: the river stops, and starts again further down.
+//
+// So a centerline is kept exactly where this build draws no water under it.
+// The test is against every lake this file draws plus the Great Lakes it leaves
+// to the map — between them, every lake on the map.
+const lakeRings = [...lakes, ...greatLakes]
+  .flatMap((f) =>
+    f.geometry.type === "MultiPolygon" ? f.geometry.coordinates : [f.geometry.coordinates]
+  )
+  .map((rings) => {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const [x, y] of rings[0]) {
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+    }
+    return { rings, x0, y0, x1, y1 };
+  });
+
+// Even-odd ray cast on plain lon/lat. A lake is a small shape far from the
+// antimeridian, so a planar test is exact enough here, and unlike d3's
+// spherical one it does not care which way the ring was wound — these are raw
+// Natural Earth rings, which this build only puts in order much further down.
+const inRing = ([x, y], ring) => {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i];
+    const [xj, yj] = ring[j];
+    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+};
+// A point a fraction of the way along a line, measured in length rather than
+// in vertices. The difference matters at both ends: a centerline drawn with two
+// points would otherwise be sampled at its endpoints, and those sit on the
+// shore, where inside and outside are the same question.
+const along = (part, t) => {
+  const spans = part.slice(1).map((p, i) => Math.hypot(p[0] - part[i][0], p[1] - part[i][1]));
+  const total = spans.reduce((a, b) => a + b, 0);
+  if (!total) return part[0];
+  let walked = 0;
+  for (let i = 0; i < spans.length; i++) {
+    if (walked + spans[i] >= t * total) {
+      const f = (t * total - walked) / spans[i];
+      return [
+        part[i][0] + f * (part[i + 1][0] - part[i][0]),
+        part[i][1] + f * (part[i + 1][1] - part[i][1]),
+      ];
+    }
+    walked += spans[i];
+  }
+  return part.at(-1);
+};
+const overDrawnLake = (geometry) => {
+  const parts =
+    geometry.type === "MultiLineString" ? geometry.coordinates : [geometry.coordinates];
+  for (const part of parts) {
+    // Three points along the thread rather than every one of them: a
+    // centerline runs down the middle of the lake it was drawn for, so if that
+    // lake is on the map at all, these are inside it.
+    for (const at of [0.25, 0.5, 0.75]) {
+      const p = along(part, at);
+      for (const lake of lakeRings) {
+        if (p[0] < lake.x0 || p[0] > lake.x1 || p[1] < lake.y0 || p[1] > lake.y1) continue;
+        if (!inRing(p, lake.rings[0])) continue;
+        if (lake.rings.some((hole, i) => i > 0 && inRing(p, hole))) continue;
+        return true;
+      }
+    }
+  }
+  return false;
+};
+
 const riverFc = await readShapefile(RIVERS, RIVERS_CACHE);
 const riversByTier = new Map(RIVER_TIERS.map((t) => [t.name, []]));
 let riverCount = 0;
+let centerlinesKept = 0;
 let centerlinesDropped = 0;
 for (const f of riverFc.features) {
   if (!f.geometry?.coordinates?.length) continue;
   if (neClean(f.properties.featurecla)?.startsWith("Lake Centerline")) {
-    centerlinesDropped++;
-    continue;
+    if (overDrawnLake(f.geometry)) {
+      centerlinesDropped++;
+      continue;
+    }
+    centerlinesKept++;
   }
   // A river the field does not place would be invisible if it fell out of
   // every tier, so the last tier takes anything unranked.
@@ -468,6 +588,106 @@ for (const f of riverFc.features) {
   });
   riverCount++;
 }
+console.log(
+  `world rivers: ${riverCount} kept — ${centerlinesDropped} lake centerlines dropped, ` +
+    `${centerlinesKept} kept where the map draws no lake`
+);
+
+// The North America supplement, tiered by system rather than by line — see
+// RIVER_TIERS above for what a system is for and which tier takes which.
+//
+// A system here is a run of same-named reaches that touch end to end. Natural
+// Earth splits a river wherever a lake interrupts it and at some junctions, and
+// gives the pieces different weights, so the reaches have to be put back
+// together before any of them can be tiered. Two rules make that safe. Only
+// lines carrying the same name join, so a creek meeting the Colorado stays a
+// creek instead of being pulled up into the Colorado's tier — which is the
+// whole point of tiering. And the join runs THROUGH the lake centerlines,
+// drawn or not, because a centerline is the only thing linking the reach above
+// a lake to the reach below it: without them the Colorado above Lake Buchanan
+// is a separate river from the Colorado below it.
+const naFc = await readShapefile(RIVERS_NA, RIVERS_NA_CACHE);
+const naLines = naFc.features.filter((f) => f.geometry?.coordinates?.length);
+const isCenterline = (f) => neClean(f.properties.featurecla)?.startsWith("Lake Centerline");
+
+// Union-find over the lines, joining any two that share an endpoint and a name.
+const systemOf = new Map(naLines.map((f, i) => [f, i]));
+const parent = naLines.map((_, i) => i);
+const find = (i) => {
+  while (parent[i] !== i) i = parent[i] = parent[parent[i]];
+  return i;
+};
+const endpoints = new Map();
+for (const f of naLines) {
+  const parts =
+    f.geometry.type === "MultiLineString" ? f.geometry.coordinates : [f.geometry.coordinates];
+  for (const part of parts) {
+    for (const end of [part[0], part.at(-1)]) {
+      const key = `${end[0].toFixed(4)},${end[1].toFixed(4)}`;
+      if (!endpoints.has(key)) endpoints.set(key, []);
+      endpoints.get(key).push(f);
+    }
+  }
+}
+for (const meeting of endpoints.values()) {
+  for (const a of meeting) {
+    // An unnamed line joins nothing, itself included: two anonymous creeks
+    // meeting are two creeks, not one river with a 700 km claim on a tier.
+    const name = neClean(a.properties.name);
+    if (!name) continue;
+    for (const b of meeting) {
+      if (b !== a && neClean(b.properties.name) === name) {
+        const [x, y] = [find(systemOf.get(a)), find(systemOf.get(b))];
+        if (x !== y) parent[y] = x;
+      }
+    }
+  }
+}
+// What each system is worth, off its drawn reaches only: a centerline is a
+// thread across a lake, not a river, and its weight is not the river's.
+const naSystems = new Map();
+for (const f of naLines) {
+  if (isCenterline(f)) continue;
+  const root = find(systemOf.get(f));
+  const sys = naSystems.get(root) ?? { weight: 0, rank: Infinity };
+  sys.weight = Math.max(sys.weight, Number(f.properties.strokeweig) || 0);
+  sys.rank = Math.min(sys.rank, Number(f.properties.scalerank));
+  naSystems.set(root, sys);
+}
+
+let naCount = 0;
+let naCenterlinesKept = 0;
+let naCenterlinesDropped = 0;
+const naByTier = new Map(RIVER_TIERS.map((t) => [t.name, 0]));
+for (const f of naLines) {
+  if (isCenterline(f)) {
+    if (overDrawnLake(f.geometry)) {
+      naCenterlinesDropped++;
+      continue;
+    }
+    naCenterlinesKept++;
+  }
+  // A kept centerline takes its system's tier, which is what makes it useful:
+  // it arrives with the reaches either side of it rather than a zoom later, so
+  // the river is whole at every zoom it is drawn at. A centerline whose system
+  // has no drawn reach — a lake thread with no river on either end — is left
+  // to the finest tier.
+  const sys = naSystems.get(find(systemOf.get(f))) ?? { weight: 0, rank: Infinity };
+  const tier = RIVER_TIERS.find((t) => t.takesNa(sys)) ?? RIVER_TIERS.at(-1);
+  riversByTier.get(tier.name).push({
+    type: "Feature",
+    properties: { name: neClean(f.properties.name) },
+    geometry: f.geometry,
+  });
+  naByTier.set(tier.name, naByTier.get(tier.name) + 1);
+  naCount++;
+}
+console.log(
+  `north america rivers: ${naCount} kept in ${naSystems.size} systems — ` +
+    `${naCenterlinesDropped} lake centerlines dropped, ` +
+    `${naCenterlinesKept} kept where the map draws no lake — ` +
+    RIVER_TIERS.map((t) => `${t.name} ${naByTier.get(t.name)}`).join(", ")
+);
 
 // Their own topology, and so their own thinning. Natural Earth draws rivers as
 // free-standing lines that share no coordinate with the land or the lakes, so
@@ -499,15 +719,16 @@ const riverLines = Object.fromEntries(
   RIVER_TIERS.map((t) => [t.name, mesh(riversThinned, riversThinned.objects[t.name])])
 );
 console.log(
-  `world rivers: ${riverCount} kept, ${centerlinesDropped} lake centerlines dropped, ` +
-    `thinned at ${RIVER_SIMPLIFY_METRES} m — ${riverPointsBefore} → ` +
+  `rivers thinned at ${RIVER_SIMPLIFY_METRES} m — ${riverPointsBefore} → ` +
     `${countPoints(riversThinned)} points`
 );
 for (const t of RIVER_TIERS) {
   const feats = riversByTier.get(t.name);
   if (!feats.length) throw new Error(`river tier ${t.name} came out empty`);
-  const upTo = t.maxRank === Infinity ? "the rest" : `scalerank up to ${t.maxRank}`;
-  console.log(`  ${t.name} (${upTo}): ${feats.length} rivers`);
+  const upTo = t.maxRank === Infinity ? "the rest" : `world scalerank up to ${t.maxRank}`;
+  console.log(
+    `  ${t.name} (${upTo}): ${feats.length} rivers, ${naByTier.get(t.name)} of them the supplement's`
+  );
 }
 
 // Rebuilding the topology is what drops the map's own countries: the arcs that

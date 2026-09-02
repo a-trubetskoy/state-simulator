@@ -211,8 +211,16 @@ export function createGlobeLabels(gl, { units, camera, globeScale }) {
     gl.bufferData(gl.ARRAY_BUFFER, data32.subarray(0, cursor * FLOATS), gl.DYNAMIC_DRAW);
   }
 
-  function draw() {
+  /**
+   * @param dim 1 at full strength, lower where the city names have taken over
+   *   the job of saying what is on the ground. A multiplier on
+   *   alpha rather than a lighter set of colours, so the halo thins with the
+   *   glyph — a full-strength white halo under a faded letter would read as a
+   *   bright smudge, which is worse than the label it is meant to support.
+   */
+  function draw(dim = 1) {
     if (!cursor) return;
+    const faded = (c) => (dim === 1 ? c : [c[0], c[1], c[2], c[3] * dim]);
     gl.useProgram(prog.program);
     gl.uniform2f(prog.u.uViewport, camera.view.width, camera.view.height);
     gl.uniform1f(prog.u.uHalo, atlas.haloUnits);
@@ -223,7 +231,7 @@ export function createGlobeLabels(gl, { units, camera, globeScale }) {
 
     if (leaderCount) {
       gl.uniform1i(prog.u.uSolid, 1);
-      gl.uniform4fv(prog.u.uColor, COLOR.leader);
+      gl.uniform4fv(prog.u.uColor, faded(COLOR.leader));
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, leaderCount);
     }
     if (glyphCount) {
@@ -237,10 +245,10 @@ export function createGlobeLabels(gl, { units, camera, globeScale }) {
       // the halo now reaches far enough on small type to cover a neighbour's
       // letter, and drawing it per glyph would leave it there.
       gl.uniform1i(prog.u.uHaloPass, 1);
-      gl.uniform4fv(prog.u.uColor, COLOR.halo);
+      gl.uniform4fv(prog.u.uColor, faded(COLOR.halo));
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, glyphCount);
       gl.uniform1i(prog.u.uHaloPass, 0);
-      gl.uniform4fv(prog.u.uColor, COLOR.fill);
+      gl.uniform4fv(prog.u.uColor, faded(COLOR.fill));
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, glyphCount);
       pointAt(0);
     }
@@ -252,6 +260,8 @@ export function createGlobeLabels(gl, { units, camera, globeScale }) {
     prepare,
     draw,
     raster: layout.raster,
+    /** Shared with cities.js: one field texture, and one place a character can go missing. */
+    atlas,
     get stats() {
       return {
         labels: layout.labels.length,

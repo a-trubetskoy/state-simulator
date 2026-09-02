@@ -22,7 +22,8 @@
 //     water.
 //  3. PCA over the component's cells gives the long axis; a least-squares
 //     quadratic in that frame gives a baseline that bends with the shape
-//     (California's arc, Florida's crook).
+//     (California's arc, Florida's crook). A baseline that is horizontal by
+//     choice skips the fit and runs dead level through the centroid.
 //  4. Walk the baseline, measuring at each step how much room there is to
 //     either side before the border. Search font sizes downward until the
 //     name fits the usable arc; stretch letter-spacing to fill it. A slanted
@@ -68,9 +69,9 @@ const ISLAND_MIN_SHARE = 0.02;
 // keep big states from shouting: the largest name sits below 2x the 9-unit
 // data labels, and an abbreviation never outsizes a full name.
 const NAME_MAX = 15;
-const NAME_MIN = 7;
+const NAME_MIN = 7.5;
 const ABBR_MAX = 12;
-const ABBR_MIN = 5.5;
+const ABBR_MIN = 6;
 const BASE_LEADER_SIZE = 8;
 const NAME_TRACK = 0.15;
 const ABBR_TRACK = 0.08;
@@ -85,13 +86,17 @@ const STEP = 2; // baseline sample spacing
 // trails after the last glyph too, which is why widths count `len` gaps).
 const FIT_FILL = 0.94;
 const STRETCH_FILL = 0.88;
-const EXTRA_TRACK_MAX = 0.9;
+// Cap on the stretch, in em: enough for a name to breathe, never so much
+// that the letters stop reading as one word.
+const EXTRA_TRACK_MAX = 0.15;
 // Horizontal bias: level text is easier to read than slanted or climbing
 // text, so a PCA-slanted label survives only when horizontal can't do the
 // name justice — UTAH along a latitude line beats UTAH climbing the state.
-// Horizontal wins whenever it fits at least as large, and even a bit smaller
-// once it reaches a comfortable reading size (clearly above the data labels,
-// with headroom below NAME_MAX so the rule still has room to trigger).
+// At a comfortable reading size (clearly above the 9-unit data labels)
+// horizontal wins outright, however much larger the slant would fit; below
+// it, the slant keeps the label only by beating horizontal decisively —
+// by more than the HORIZ_RATIO margin. Both are in map units: comparisons
+// against fitted sizes scale by `k` where the raster is stretched.
 const HORIZ_COMFORT = 11;
 const HORIZ_RATIO = 0.8;
 // Stacked two-line names: the distance between line centers, and how
@@ -517,29 +522,37 @@ export function createStateLabeler({
     // long axis, smaller when a horizontal retry cuts across a tall shape.
     const varU = ux * ux * sxx + 2 * ux * uy * sxy + uy * uy * syy;
 
-    // Least squares v = a + b*u + c*u² in the axis frame.
-    let s1 = 0, s2 = 0, s3 = 0, s4 = 0, t0 = 0, t1 = 0, t2 = 0;
-    for (let i = 0; i < n; i++) {
-      const dx = (cells[i] % W) + 0.5 - mx;
-      const dy = ((cells[i] / W) | 0) + 0.5 - my;
-      const u = dx * ux + dy * uy;
-      const v = -dx * uy + dy * ux;
-      const uu = u * u;
-      s1 += u;
-      s2 += uu;
-      s3 += uu * u;
-      s4 += uu * uu;
-      t0 += v;
-      t1 += u * v;
-      t2 += uu * v;
+    // A baseline that is horizontal by choice — the level retry, or a
+    // near-round shape's default — stays level: a straight latitude line
+    // through the centroid. The least-squares fit below would put the slant
+    // straight back: a diagonal state's cells drift downward along u, `b`
+    // follows them, and the "horizontal" retry came out the same diagonal
+    // under another name.
+    let a = 0, b = 0, c = 0;
+    if (theta !== 0) {
+      // Least squares v = a + b*u + c*u² in the axis frame.
+      let s1 = 0, s2 = 0, s3 = 0, s4 = 0, t0 = 0, t1 = 0, t2 = 0;
+      for (let i = 0; i < n; i++) {
+        const dx = (cells[i] % W) + 0.5 - mx;
+        const dy = ((cells[i] / W) | 0) + 0.5 - my;
+        const u = dx * ux + dy * uy;
+        const v = -dx * uy + dy * ux;
+        const uu = u * u;
+        s1 += u;
+        s2 += uu;
+        s3 += uu * u;
+        s4 += uu * uu;
+        t0 += v;
+        t1 += u * v;
+        t2 += uu * v;
+      }
+      const sol = solve3([[n, s1, s2], [s1, s2, s3], [s2, s3, s4]], [t0, t1, t2]);
+      if (sol) [a, b, c] = sol;
+      // Cap the bend so the sagitta over the shape's span stays modest — a wild
+      // parabola from a lopsided shape would fling the text around.
+      const cMax = 0.22 / Math.max(8, 2 * Math.sqrt(varU));
+      if (Math.abs(c) > cMax) c = Math.sign(c) * cMax;
     }
-    const sol = solve3([[n, s1, s2], [s1, s2, s3], [s2, s3, s4]], [t0, t1, t2]);
-    let [a, b, c] = sol ?? [0, 0, 0];
-    // Cap the bend so the sagitta over the shape's span stays modest — a wild
-    // parabola from a lopsided shape would fling the text around.
-    const halfSpan = 2 * Math.sqrt(varU);
-    const cMax = 0.22 / Math.max(8, halfSpan);
-    if (Math.abs(c) > cMax) c = Math.sign(c) * cMax;
 
     const m = Math.min(600, Math.max(3, Math.round((2 * (2.6 * Math.sqrt(varU) + 4)) / STEP) + 1));
     const U = ((m - 1) * STEP) / 2;
@@ -920,8 +933,8 @@ export function createStateLabeler({
           if (
             fitH &&
             (!fitA ||
-              fitH.size >= fitA.size ||
-              (fitH.size >= HORIZ_COMFORT && fitH.size >= HORIZ_RATIO * fitA.size))
+              fitH.size >= HORIZ_COMFORT * k ||
+              fitH.size >= HORIZ_RATIO * fitA.size)
           )
             return { prof: profH, fit: fitH };
           return fitA ? { prof: profA, fit: fitA } : null;

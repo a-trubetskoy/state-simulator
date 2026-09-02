@@ -35,7 +35,13 @@ Painting in an inset paints the real unit — the two copies are the same county
 
 Vanilla JavaScript + [D3](https://d3js.org/), bundled with Vite. No framework.
 
-- `src/main.js` — map rendering, county painting, stats, elections, and rankings
+- `src/main.js` — the app itself: the model (assignments, state records, county and state adjacency), the projection and baking, county painting, the data view, and every panel of UI.
+  It is organized as named sections, each opened by a `// ----` divider, so `grep "^// ---" src/main.js` lists its contents
+- `src/stats.js` — the scoring layer: apportionment, electoral votes, rankings, the stat definitions the sidebar and data view are both driven by, and the display formatters.
+  Pure functions over a stats map, with no DOM and no loaded data, so each one can be read on its own
+- `src/palette.js` — every color the map draws, and the three transforms (`deepen`, `dimmed`, `highlight`) that derive one color from another
+- `src/layers.js` — the deck.gl layer list, rebuilt on every refresh into three stacks (map, hover, inset).
+  What it reads is declared in its two argument lists rather than closed over, so the renderer's inputs are visible without reading the body
 - `src/presets.js` — preset regions as county FIPS lists, with tract-carved partial counties where a region's border cuts through one
 - `src/labels.js` — atlas-style state name labels (non-US units stay unlabeled)
 - `src/split.js` — county carving on the deck.gl fallback: reconciling tract detail with the drawn map, dividing a county's row without moving any total, and re-owning borders as carves accumulate.
@@ -132,7 +138,7 @@ It is scenery and nothing more: no unit belongs to it, nothing hovers, nothing p
 `scripts/build-world.mjs` builds it from the Natural Earth 10m admin-0 and 10m lakes files the main pipeline already caches, through the same simplify/despeckle/rewind pipeline the map runs.
 It adds the Census-only lakes described under Lakes below, and the world's rivers, described under Rivers.
 The land is thinned at 6 km rather than the map's 1.6 km, since it is only ever read at continental zoom.
-That coarser tolerance is most of what keeps the land to 1.75 MB, against the 1.83 MB the map's own counties cost; the rivers add another 1.03 MB, for 2.80 MB in all.
+That coarser tolerance is most of what keeps the land to 1.75 MB, against the 1.83 MB the map's own counties cost; the rivers add another 1.59 MB, for 3.36 MB in all.
 The lakes are the one exception and keep every point Natural Earth gave them, for the reason under Lakes below.
 
 The countries the map draws itself are left out of the file rather than covered over by it.
@@ -207,27 +213,53 @@ Rivers come out of `build-world.mjs` alongside the scenery, but they are not sce
 They live in that file because the map's water furniture is already whole-world.
 The lakes above are what the renderer draws over the county fills, so a river in Missouri and a river in Peru can be one layer built from one source, rather than two pipelines that then have to be kept looking alike.
 
-The source is Natural Earth 10m rivers and lake centerlines, 1,473 lines.
-The 259 lake centerlines are dropped.
-A centerline is the synthetic thread Natural Earth runs through a lake so that a river system reads as continuous on a small-scale map, and this map draws its lakes as water at full detail: over one, a centerline is a blue line down the middle of a blue lake, and the St. Lawrence would appear to run straight across Lake Ontario.
-Here a river meeting a lake ends at the shore, which is what a river does.
-The 1,214 that are left include the 11 intermittent rivers and the two canals Natural Earth files under the same cover; there are too few to be worth a rule of their own, and each is a line Natural Earth thinks worth drawing at 1:10m.
+The source is two Natural Earth files: 10m rivers and lake centerlines, 1,473 lines, and the 10m North America supplement, 4,897.
+The world file on its own is thin over the continent the map is about.
+It draws the Rio Grande and the Brazos and no Colorado through Austin, no Trinity, no Guadalupe, no Nueces, because Natural Earth publishes the rest of the continent in the supplement instead.
+The two are all but disjoint: of the supplement's 4,022 drawn lines, exactly one — the Nipigon — traces a course the world file already has, so they go in side by side with no merge to do.
+
+A centerline is the synthetic thread Natural Earth runs through a lake so that a river system reads as continuous on a small-scale map, and whether one belongs here depends on the lake it crosses.
+Over a lake the map draws it is a blue line down the middle of a blue lake, and the St. Lawrence would run straight across Lake Ontario.
+Where no lake is drawn it is the opposite: the only thing keeping the river whole.
+Natural Earth's lake file has most of the world's reservoirs missing, so the Colorado through Austin meets Lake Buchanan and Lake Travis as 20 km and 57 km of nothing at all — the river stops, and starts again below the dam.
+So a centerline is kept exactly where the build draws no water under it.
+The test is against every lake this file draws plus the Great Lakes it leaves to the map, which between them are every lake on the map.
+The Great Lakes have to be in that test rather than left to the draw order: the map's own water is drawn under the rivers, while the scenery's lakes are drawn over them and would cover a centerline by themselves.
+That keeps 4 of the world file's 259 centerlines and 524 of the supplement's 856, and drops the rest.
+A kept centerline takes the tier of the river system it belongs to, so it arrives with the reaches either side of it rather than a zoom later.
+
+The 5,764 lines that are left include the 94 intermittent rivers and the nine canals Natural Earth files under the same cover; there are too few to be worth a rule of their own, and each is a line Natural Earth thinks worth drawing at 1:10m.
 
 They are thinned at the map's own 1.6 km rather than the land's 6 km.
 The land can take 6 km because it is only read at continental zoom; a river is read at every zoom the map has, drawn alongside a coastline generalized at 1.6 km, and any coarser tolerance would make it the one obviously angular line on a map of smooth ones.
-That is close to what the source already is — the median segment in the Natural Earth file is 1.8 km — so the pass mostly drops points Natural Earth oversampled: 247,665 to 127,083, for 125,141 line segments in the compiled globe geometry against the 439,702 the map had before them.
+That is close to what the source already is — the median segment is 1.8 km in the world file and 1.7 km in the supplement — so the pass mostly drops points Natural Earth oversampled: 441,053 to 191,518, for 184,505 line segments in the compiled globe geometry against the 439,702 the map had before them.
 The thinning runs on the rivers' own topology, since they share no arc with the land or the lakes and so have nothing to gain from the pass that thins those.
 
 They come out in four tiers rather than as one line, so the renderer can bring them in as the view gets close enough for them to be worth drawing.
-Drawing all of them at every zoom is right at no zoom at all: 1,214 lines over a whole globe is a haze, and the same 1,214 is thin once the view is down to a few counties.
+Drawing all of them at every zoom is right at no zoom at all: 5,764 lines over a whole globe is a haze, and the same 5,764 is thin once the view is down to a few counties.
 The split is Natural Earth's own `scalerank`, an editorial 1-to-12 ordering of how much a river matters, which is what the field is published for.
 Its other candidate, `min_zoom`, is a slippy-map hint and is inconsistent with itself here — rank 9 rivers carry both 4.7 and 7.1 — so `scalerank` is the axis.
-The cuts fall where the counts step: 155 lines through rank 4, 252 more through rank 6, 267 at rank 7, and the 540 mostly unnamed tributaries above it.
+The cuts fall where the world file's counts step: 155 lines through rank 4, 252 more through rank 6, 267 at rank 7, and the 540 mostly unnamed tributaries above it.
+
+The supplement needs a second axis, because its `scalerank` is not the world file's.
+Every line in it is ranked 10 to 12: the file is what Natural Earth adds on top of a world map already drawn, so its ranks say "finer than the world file" and nothing about how one supplement river compares to another.
+Read as the world file's ranks they would put the Colorado through Austin in the same tier as a creek, and both of them below every rank-9 line on Earth.
+What the supplement carries instead is `strokeweig`, the width Natural Earth draws each line at, which the world file does not have.
+It is a coarse ordering — 0.15, 0.2, 0.25 and 0.3 — and its top two classes are the rivers a reader would name: the Colorado, the Trinity, the Guadalupe, the Nueces, the Neches, the Ouachita, the Cimarron, the Niobrara, the Penobscot, the Kootenay.
+Those go in tier 2, beside the world file's ranks 5 and 6, which is where the Brazos next to them already is.
+The rest of rank 10 goes in tier 3 and ranks 11 and 12 in tier 4.
+
+The supplement is tiered by river system rather than by line.
+Natural Earth cuts it at every lake and at some junctions and gives the pieces different weights: the Colorado comes as three reaches, weighted 0.3 from the Gulf to Austin and 0.2 for the 700 km above it.
+Cut per line, the map would draw the heavy reach at zoom 8 and stop the river dead at Austin until 10.5, and half the length of the heavy rivers sits on lighter reaches like that.
+So the lines are grouped into systems first — reaches that carry the same name and touch end to end — and a system takes the tier its heaviest reach earns.
+The grouping runs through the lake centerlines whether or not one ends up drawn, because a centerline is the only thing linking the reach above a lake to the reach below it.
+It joins only same-named lines, so a creek meeting the Colorado stays a creek instead of being pulled up into the Colorado's tier, which is what the tiers exist to keep apart.
+That puts 210 river lines from 81 systems in tier 2, 766 from 470 more in tier 3, and the remaining 3,046 in tier 4, with each kept centerline following the system it threads.
 
 The four tiers go into one topology as four objects rather than into four topologies.
 A tributary meets its river at a shared coordinate and the two are usually in different tiers, so one topology cuts an arc at that junction and the tiers meet exactly there instead of overlapping by a point.
-That is where the 1,707 lines that come out exceed the 1,691 a single mesh gave: 16 of them are junction splits.
-Each tier is meshed into its own MultiLineString, the way `coast` and `borders` are, so a tier projects in a single pass; 485 lines in all touch North America.
+Each tier is meshed into its own MultiLineString, the way `coast` and `borders` are, so a tier projects in a single pass: 281, 530, 979 and 3,101 lines.
 `build-geometry.mjs` compiles each tier as an ordinary line group, and since a group is a range in the buffer, drawing three tiers of four is three draw calls over one contiguous stretch of it — no per-instance test and no extra geometry.
 
 Tier order is the contract between the three files.
@@ -239,9 +271,9 @@ Below the range the layer is not drawn, across it the stroke ramps up from nothi
 The ranges read in d3.zoom's own `k`, the number the user turns — 0.2 puts the whole sphere in frame, 1 is the home view over the lower 48, 16 is as close as the view goes — rather than in the camera's pixel radius, so a tier arrives at the same zoom whatever size the window is.
 The home view carries no rivers at all: the first tier only starts at 2, a zoom step past it.
 At the scale where the lower 48 fits on screen a river is a thread that adds texture and no information, and the map is about who owns the ground; rivers are what you find on the way in.
-The four come in over 2.8–3.8, 6.5–8, 10.5–12 and 13–15, so there are 155 rivers by 3.8, 407 by 8, 674 by 12 and all 1,214 by 15, just short of the 16 limit.
+The four come in over 2.8–3.8, 6.5–8, 10.5–12 and 13–15, so there are 155 rivers by 3.8, 654 by 8, 1,772 by 12 and all 5,764 by 15, just short of the 16 limit.
 Their ranges are staggered against the lake tiers rather than landing on the same zooms, so the water arrives one kind at a time — lakes, rivers, lakes, rivers — instead of doubling the map's detail at a stroke.
-They are faded rather than switched because 267 lines arriving at one threshold reads as a flash.
+They are faded rather than switched because 1,118 lines arriving at one threshold reads as a flash.
 Two earlier passes were both too generous: the first had river tier 2 fully in at the home view and every tier in by 6.5, and the second still put 23 rivers on the home view.
 The cost is nothing: a zoom already redraws the scene (`setTransform` bumps the camera version and the scene texture is cached against it), so the fade is one clamp per layer per frame, and a tier that has not arrived is a draw call that never runs.
 

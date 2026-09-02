@@ -1,14 +1,27 @@
-/* Crisp minimal: white surfaces, hairline borders, square corners, dense
-   spacing, no shadows, no animations. */
+/* Secure console, "modern white": near-black slate chrome, one saturated
+   blue accent for links, selection and active controls, flat 1px borders,
+   a pure-white page ground — grey survives only on controls, stripes and
+   rules. Square corners, dense spacing, no shadows, no animations. */
 
 :root {
-  --text: #111;
-  --muted: #666;
-  --line: #ccc;
-  --line-strong: #888;
-  --accent: #0044cc;
-  --hover: #eee;
-  --sel: #e8eefc;
+  --brand: #0f172a;
+  /* The chrome bars (masthead, dialog titles) wear a lighter slate than the
+     near-black brand ink, which stays for text and the tooltip. */
+  --chrome: #33415e;
+  --accent: #1d4ed8;
+  --page: #ffffff;
+  --edge: #98a2b3;
+  --hair: #e4e7ec;
+  --strip: #eef4ff;
+  --face: #ffffff;
+  --face-lo: #c6cdd8;
+  --ink: #101828;
+  --soft: #475467;
+  --sel-row: #dbe7ff;
+  --dem: #2563eb;
+  --gop: #dc2626;
+  --ui: Verdana, Geneva, Tahoma, sans-serif;
+  --mono: "Courier New", Courier, monospace;
 }
 
 * {
@@ -17,11 +30,14 @@
 
 body {
   margin: 0;
-  font-family: Verdana, Geneva, Tahoma, sans-serif;
-  background: #fff;
-  color: var(--text);
-  font-size: 12px;
-  line-height: 1.4;
+  background: var(--page);
+  color: var(--ink);
+  font: 11px/1.45 var(--ui);
+  /* The app shell is exactly one screen tall and scrolls in its own panes, so
+     the page never needs a scrollbar. Without this, any popover that reaches
+     past the bottom edge grows the document, and the scrollbar that appears
+     narrows the layout and re-wraps the panel — the app jumps on a click. */
+  overflow: hidden;
   /* Tapping a button on touch flashes a grey box around it otherwise. */
   -webkit-tap-highlight-color: transparent;
 }
@@ -36,170 +52,204 @@ body {
   height: 100dvh;
 }
 
-/* ------------------------------------------------------------- header */
+:focus {
+  outline: none;
+}
 
-header {
+:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -3px;
+}
+
+a {
+  color: var(--accent);
+}
+
+/* ------------------------------------------------------------ masthead */
+
+#masthead {
+  flex: none;
+  background: var(--chrome);
+  color: #fff;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 6px 10px;
-  border-bottom: 1px solid var(--line-strong);
-  flex-wrap: wrap;
+  gap: 4px;
+  padding: 5px 12px 5px 10px;
+  border-bottom: 1px solid #22304a;
 }
 
-.brand {
-  flex: 1;
-  min-width: 220px;
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
+#seal {
+  flex: none;
+  display: block;
+  margin-right: 5px;
 }
 
-h1 {
-  font-size: 15px;
+#wordmark {
+  flex: none;
+  min-width: 0;
+  margin-left: 10px;
+}
+
+#wordmark h1 {
   margin: 0;
+  font: bold 15px/1.1 var(--ui);
+  letter-spacing: 3px;
 }
 
-.tagline {
-  margin: 0;
-  color: var(--muted);
-  font-size: 11px;
+#goldrule {
+  flex: none;
+  height: 0;
+  border-top: 1px solid #33415e;
+  border-bottom: 2px solid var(--accent);
 }
 
-.preset-box {
+/* The find box doubles as the preset loader: one well, one dropdown. */
+.findwrap {
   position: relative;
+  display: flex;
+  align-items: center;
+  margin-left: 4px;
 }
 
 #preset-search {
   width: 300px;
-  max-width: 45vw;
-  padding: 4px 8px;
-  border: 1px solid var(--line-strong);
-  font: inherit;
-  background: #fff;
-  outline: none;
 }
 
-#preset-search:focus {
-  border-color: var(--text);
+#preset-search::placeholder {
+  color: #98a2b3;
 }
 
 #preset-menu {
   position: absolute;
   top: 100%;
   left: 0;
-  right: 0;
-  background: #fff;
-  border: 1px solid var(--line-strong);
-  border-top: none;
+  width: 340px;
   max-height: 340px;
-  overflow: auto;
-  z-index: 20;
+  overflow-y: auto;
+  background: #fff;
+  /* The dropdown hangs off the masthead, whose text is white; on the menu's
+     white ground that inheritance would leave the preset names invisible. */
+  color: var(--ink);
+  border: 1px solid var(--edge);
+  z-index: 60;
+}
+
+#preset-menu[hidden] {
+  display: none;
+}
+
+.rgroup {
+  padding: 2px 8px;
+  background: var(--strip);
+  border-bottom: 1px solid var(--hair);
+  font-size: 9px;
+  font-weight: bold;
+  letter-spacing: 1.2px;
+  color: var(--soft);
+  text-transform: uppercase;
 }
 
 .preset-item {
-  padding: 5px 8px;
+  padding: 3px 8px;
   cursor: pointer;
 }
 
 .preset-item:hover {
-  background: var(--sel);
+  background: var(--sel-row);
 }
 
 .preset-item small {
   display: block;
-  color: var(--muted);
-  font-size: 11px;
+  color: var(--soft);
 }
 
 .preset-none {
   padding: 6px 8px;
-  color: var(--muted);
+  color: var(--soft);
 }
 
-/* ------------------------------------------------------------ buttons */
+/* ------------------------------------------------------------- controls */
 
 .btn {
-  font: inherit;
-  padding: 4px 10px;
-  border: 1px solid var(--line-strong);
-  background: #fff;
-  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: 11px var(--ui);
+  color: var(--ink);
+  padding: 3px 9px;
+  background: var(--face);
+  border: 1px solid var(--face-lo);
   cursor: pointer;
   white-space: nowrap;
 }
 
 .btn:hover {
-  background: var(--hover);
-  border-color: var(--text);
+  background: #f1f5f9;
 }
 
-.btn-primary {
-  background: var(--text);
-  border-color: var(--text);
-  color: #fff;
+.btn:active,
+.btn.active {
+  border-color: var(--accent);
+  background: #e7efff;
 }
 
-.btn-primary:hover {
-  background: #333;
-  color: #fff;
+.btn svg {
+  display: block;
+  flex: none;
+}
+
+/* inline-flex above would outrank the UA's [hidden] rule. */
+.btn[hidden] {
+  display: none;
 }
 
 .btn-small {
-  padding: 1px 8px;
-  font-size: 11px;
+  padding: 2px 7px;
+  font-size: 10px;
 }
 
-/* A quiet button steps back from the panel's main actions: muted until
-   hovered, for the occasional tool (the GeoJSON import) that shouldn't
-   compete with Edit borders. */
-.btn-quiet {
-  color: var(--muted);
-}
-
-.btn-quiet:hover {
-  color: var(--text);
-}
-
-/* Discard is destructive, so it wears the app's red (the election bar's R
-   tone) instead of the neutral button grey. */
+/* Discard is destructive, so it wears the app's red instead of the neutral
+   button grey. */
 #paint-discard {
-  color: #bf4040;
-  border-color: #bf4040;
+  color: var(--gop);
+  border-color: #e6b4ae;
 }
 
 #paint-discard:hover {
   background: #fbeeec;
-  border-color: #bf4040;
+  border-color: var(--gop);
 }
 
-/* --------------------------------------------------------- inset boxes */
-
-/* Alaska/Hawaii inset frames, shown while the matching #map-tools button is
-   active. The insets are UI, pinned above the bottom-left buttons: the
-   frames draw in the overlay SVG under a transform (set from main.js) that
-   matches the inset deck's fixed camera, and non-scaling strokes keep them
-   hairline-thin. */
-#inset-ui .inset-frame {
-  fill: none;
-  stroke: #b9c0ca;
-  stroke-width: 1;
-  vector-effect: non-scaling-stroke;
+select,
+input[type="text"],
+.state-name {
+  font: 11px var(--ui);
+  color: var(--ink);
+  background: #fff;
+  border: 1px solid var(--face-lo);
+  padding: 3px 4px;
 }
 
-/* ---------------------------------------------------------------- map */
+.tsep {
+  width: 0;
+  height: 20px;
+  margin: 0 6px;
+  border-left: 1px solid #d0d7e2;
+  border-right: 1px solid #fff;
+}
 
-/* Map top-left, state panel beneath it, sidebar a full-height column beside
-   both. A grid rather than nested flex columns because the panel and the
-   sidebar share a wrapper (#tray): on desktop the wrapper dissolves
-   (display: contents) and its children place themselves on this grid; on a
-   phone the same wrapper becomes a bottom sheet (see narrow screens). */
+.tspring {
+  flex: 1;
+}
+
+/* ----------------------------------------------------------------- main */
+
 main {
   flex: 1;
   min-height: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 330px;
-  grid-template-rows: minmax(0, 1fr) auto;
+  display: flex;
+  gap: 9px;
+  padding: 9px;
 }
 
 #tray,
@@ -212,10 +262,66 @@ main {
   display: none;
 }
 
-#map-wrap {
-  grid-area: 1 / 1;
+#map-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Property-sheet tabs joined to the viewport frame. */
+#tabrow {
+  flex: none;
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  padding: 0 6px;
+}
+
+#tabrow .btn {
+  margin-bottom: 3px;
+}
+
+#tabrow .tsep {
+  margin-bottom: 5px;
+}
+
+#view-toggle {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+#view-toggle[hidden] {
+  display: none;
+}
+
+.tab {
+  font: 11px var(--ui);
+  color: var(--ink);
+  background: #e7ebf1;
+  border: 1px solid var(--edge);
+  border-bottom: none;
+  padding: 4px 16px 3px;
+  cursor: pointer;
   position: relative;
+}
+
+.tab.active {
+  background: #fff;
+  font-weight: bold;
+  padding-bottom: 5px;
+  margin-bottom: -1px;
+  z-index: 2;
+}
+
+/* ------------------------------------------------------------------ map */
+
+#map-wrap {
+  flex: 1;
   min-height: 0;
+  position: relative;
+  border: 1px solid var(--edge);
   /* Absolutely positioned children (tooltip, banner) must never extend the
      document and summon a scrollbar — that shifts the whole layout. */
   overflow: hidden;
@@ -224,6 +330,15 @@ main {
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;
+}
+
+/* Inner neatline, the atlas plate's second rule. */
+#map-wrap::after {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  border: 1px solid rgba(16, 24, 40, 0.28);
+  pointer-events: none;
 }
 
 #map-canvas {
@@ -240,7 +355,7 @@ main {
 }
 
 /* The hover tint: its own deck, so hovering never redraws the map's stack.
-   Like the inset canvas it is pointer-transparent â the overlay SVG takes
+   Like the inset canvas it is pointer-transparent — the overlay SVG takes
    every event. */
 #hover-canvas {
   position: absolute;
@@ -283,6 +398,18 @@ main {
 
 #map.painting {
   cursor: crosshair;
+}
+
+/* Alaska/Hawaii inset frames, shown while the matching #inset-tools tab is
+   active. The insets are UI, pinned above the bottom-left tabs: the
+   frames draw in the overlay SVG under a transform (set from main.js) that
+   matches the inset deck's fixed camera, and non-scaling strokes keep them
+   hairline-thin. */
+#inset-ui .inset-frame {
+  fill: none;
+  stroke: #b9c0ca;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
 }
 
 /* The font size lives on the group as an SVG attribute (set from main.js,
@@ -366,7 +493,7 @@ main {
   left: 50%;
   transform: translateX(-50%);
   background: #fff;
-  border: 1px solid var(--text);
+  border: 1px solid var(--edge);
   padding: 4px 6px 4px 10px;
   display: flex;
   align-items: center;
@@ -376,15 +503,8 @@ main {
 
 #paint-banner .hint,
 #carve-banner .hint {
-  color: var(--muted);
-  font-size: 11px;
-}
-
-/* The armed Carve button inverts, like the view-mode and inset toggles. */
-#carve.active {
-  background: var(--text);
-  border-color: var(--text);
-  color: #fff;
+  color: var(--soft);
+  font-size: 10px;
 }
 
 /* Transient notices over the map (sliced X in two, no tract data here, …):
@@ -400,80 +520,82 @@ main {
   left: 50%;
   transform: translateX(-50%);
   background: #fff;
-  border: 1px solid var(--line-strong);
-  color: var(--text);
+  border: 1px solid var(--edge);
+  color: var(--ink);
   padding: 4px 10px;
-  font-size: 12px;
   max-width: min(560px, 80%);
   text-align: center;
   pointer-events: none;
 }
 
-/* Bottom-left button cluster: Reset view plus the Alaska/Hawaii inset
-   toggles. An active toggle inverts, like the view-mode buttons. */
-#map-tools {
+/* The Alaska/Hawaii expanders: tabs riding the bottom edge where the inset
+   boxes open, like tray handles — a chevron points up to expand, down to
+   collapse (main.js toggles .active). They sit on the neatline so they read
+   as part of the frame, not as floating buttons. */
+#inset-tools {
   position: absolute;
-  left: 8px;
-  bottom: 8px;
+  left: 12px;
+  bottom: 2px;
   display: flex;
-  gap: 6px;
+  gap: 3px;
 }
 
-#map-tools .btn.active {
-  background: var(--text);
-  border-color: var(--text);
-  color: #fff;
-}
-
-/* atlas / data view toggle */
-
-#view-toggle {
-  position: absolute;
-  top: 8px;
-  left: 8px;
-  display: flex;
+.tray-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font: 10px var(--ui);
+  color: var(--soft);
   background: #fff;
-  border: 1px solid var(--line-strong);
-}
-
-#view-toggle[hidden] {
-  display: none;
-}
-
-#view-toggle button {
-  font: inherit;
-  font-size: 11px;
-  padding: 3px 10px;
-  border: none;
-  background: none;
-  color: var(--text);
+  border: 1px solid var(--edge);
+  border-bottom: none;
+  padding: 2px 9px 3px;
   cursor: pointer;
 }
 
-#view-toggle button + button {
-  border-left: 1px solid var(--line-strong);
+.tray-tab::before {
+  content: "▲";
+  font-size: 7px;
+  color: inherit;
 }
 
-#view-toggle button:hover {
-  background: var(--hover);
+.tray-tab:hover {
+  background: #f1f5f9;
+  color: var(--ink);
 }
 
-#view-toggle button.active {
-  background: var(--text);
-  color: #fff;
+.tray-tab.active {
+  color: var(--ink);
+}
+
+.tray-tab.active::before {
+  content: "▼";
+}
+
+/* Reset view keeps the corner opposite the expanders; the data-view legend
+   stacks above it. */
+#reset-view {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+}
+
+/* Map furniture boxes share one dress. */
+.mapbox {
+  position: absolute;
+  background: #fff;
+  border: 1px solid var(--edge);
+  padding: 5px 8px;
+  font-size: 10px;
 }
 
 /* data view legend */
 
 #map-legend {
-  position: absolute;
-  right: 8px;
-  bottom: 8px;
-  background: #fff;
-  border: 1px solid var(--line-strong);
-  padding: 6px 8px;
-  font-size: 11px;
-  line-height: 1.4;
+  right: 10px;
+  bottom: 42px; /* clears the Reset view button in the corner below */
+  min-width: 150px;
+  line-height: 1.5;
 }
 
 #map-legend[hidden] {
@@ -482,19 +604,23 @@ main {
 
 #map-legend b {
   display: block;
-  margin-bottom: 4px;
+  font: bold 10px var(--ui);
+  letter-spacing: 0.5px;
+  margin-bottom: 3px;
+  color: var(--brand);
+  text-transform: uppercase;
 }
 
 .legend-bar {
   width: 160px;
   height: 10px;
-  border: 1px solid var(--line);
+  border: 1px solid #667085;
 }
 
 .legend-ends {
   display: flex;
   justify-content: space-between;
-  color: var(--muted);
+  color: var(--soft);
   margin-top: 2px;
 }
 
@@ -502,7 +628,7 @@ main {
   display: flex;
   align-items: center;
   gap: 6px;
-  color: var(--muted);
+  color: var(--soft);
 }
 
 /* Swatch colors are set inline from the stat's own symbol colors. */
@@ -527,19 +653,18 @@ main {
 #tooltip {
   position: absolute;
   pointer-events: none;
-  background: #ffffe1;
-  color: #000;
-  border: 1px solid #000;
-  padding: 3px 6px;
-  font-size: 11px;
-  line-height: 1.45;
+  background: var(--brand);
+  color: #fff;
+  border: 1px solid var(--brand);
+  padding: 3px 7px;
+  font: 11px/1.5 var(--ui);
   z-index: 10;
   max-width: 240px;
 }
 
 /* The estimated-fields caveat on a split county's half. */
 #tooltip .tip-note {
-  color: #666;
+  color: #98a2b3;
   font-size: 10px;
 }
 
@@ -573,40 +698,97 @@ main {
   vector-effect: non-scaling-stroke;
 }
 
-/* ------------------------------------------------------------ sidebar */
+/* -------------------------------------------------------------- sidebar */
 
 #sidebar {
-  grid-area: 1 / 2 / 3 / 3;
-  border-left: 1px solid var(--line-strong);
+  flex: none;
+  width: 332px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  min-height: 0;
+  /* A very short window squeezes the rankings to their floor first; past
+     that the whole column scrolls rather than clipping. */
+  overflow-y: auto;
+}
+
+.box {
   background: #fff;
+  border: 1px solid var(--edge);
   display: flex;
   flex-direction: column;
   min-height: 0;
-  overflow: auto;
 }
 
-.card {
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--line);
-}
-
-.rank-chip {
-  color: var(--muted);
-  font-size: 11px;
-  white-space: nowrap;
-}
-
-.dot {
-  width: 12px;
-  height: 12px;
+.box > h2 {
   flex: none;
-  border: 1px solid rgba(0, 0, 0, 0.35);
+  margin: 0;
+  padding: 4px 9px;
+  background: var(--strip);
+  border-bottom: 1px solid var(--hair);
+  font: bold 10px var(--ui);
+  letter-spacing: 1.2px;
+  color: var(--brand);
+  text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.box > h2 .aux {
+  margin-left: auto;
+  font-weight: normal;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--soft);
+}
+
+/* Only the rankings box flexes; these two hold their content height so a
+   short window squeezes the list, not the stat rows. */
+#statebox,
+#elections {
+  flex: none;
+}
+
+#statebox section[hidden] {
+  display: none;
+}
+
+/* The no-selection card is the whole-USA roll-up; the click-a-state hint
+   rides below its stats. */
+#usa-meta {
+  padding: 8px 9px 5px;
+  color: var(--soft);
+  font-size: 10px;
+}
+
+#empty-card p {
+  margin: 0;
+  padding: 8px 9px 10px;
+  color: var(--soft);
+  line-height: 1.6;
+}
+
+/* selected state */
+
+#idrow {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 9px 2px;
 }
 
 /* The state card's dot doubles as the color-picker button. */
 .dot-wrap {
   position: relative;
   display: flex;
+}
+
+.dot {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  border: 1px solid rgba(16, 24, 40, 0.45);
 }
 
 button.dot {
@@ -624,10 +806,9 @@ button.dot:disabled {
   position: absolute;
   top: calc(100% + 4px);
   left: 0;
-  z-index: 5;
+  z-index: 40;
   background: #fff;
-  border: 1px solid var(--line-strong);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  border: 1px solid var(--edge);
   padding: 6px;
   display: grid;
   grid-template-columns: repeat(7, 14px);
@@ -647,171 +828,228 @@ button.dot:disabled {
 }
 
 .swatch.current {
-  outline: 2px solid #333;
+  outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
 
-/* ------------------------------------------- state panel (bottom bar) */
-
-/* Both sections occupy the same grid cell, and the hidden one is invisible
-   rather than removed — so the panel is always as tall as the taller section
-   and the map viewport can't jiggle when a selection appears or clears. The
-   min-height budgets for the tallest identity column: a foreign unit's third
-   action button wraps .panel-actions onto a second row. */
-#state-panel {
-  grid-area: 2 / 1;
-  border-top: 1px solid var(--line-strong);
-  background: #fff;
-  display: grid;
-}
-
-#state-panel section {
-  grid-area: 1 / 1;
-  min-height: 132px;
-  padding: 10px 14px;
-  display: flex;
-  align-items: stretch;
-  gap: 16px;
-}
-
-#state-panel section[hidden] {
-  visibility: hidden;
-}
-
-#empty-card {
-  align-items: center;
-  justify-content: center;
-  color: var(--muted);
-}
-
-#empty-card p {
-  margin: 0;
-}
-
-/* Identity column: swatch + editable name, county count, the paint button. */
-.panel-id {
-  flex: none;
-  width: 210px;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 3px;
-}
-
-.card-top {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
 .state-name {
-  font: inherit;
-  font-size: 14px;
-  font-weight: 700;
-  border: none;
+  font: bold 13px var(--ui);
+  border-color: transparent;
   background: transparent;
   flex: 1;
   min-width: 0;
-  padding: 2px 4px;
-  outline: none;
+  padding: 1px 4px;
 }
 
 .state-name:hover {
-  background: var(--hover);
+  background: #f1f5f9;
 }
 
 .state-name:focus {
   background: #fff;
-  outline: 1px dotted var(--muted);
+  border-color: var(--face-lo);
 }
 
-.panel-meta {
-  color: var(--muted);
+/* The state card's flag doubles as the country-picker button, the same
+   pattern as the color dot beside it. */
+.flag-wrap {
+  position: relative;
+  display: flex;
+  flex: none;
+  margin-left: auto;
+}
+
+.flag-btn {
+  width: 24px;
+  height: 17px;
+  flex: none;
+  padding: 0;
+  border: 1px solid var(--face-lo);
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.flag-btn:hover {
+  border-color: var(--ink);
+}
+
+/* Real flag artwork (flag-icons' SVGs) rather than the Unicode flag emoji —
+   Windows draws those as plain two-letter text, not a flag. Shared by the
+   button and the menu's rows so both stay the same size and aspect. A state
+   with no country picked (independent) gets a plain swatch in the map's own
+   foreign tan instead of a flag that doesn't exist. */
+.flag-icon {
+  width: 20px;
+  height: 15px;
+  flex: none;
+  object-fit: cover;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+}
+
+.flag-icon.independent {
+  background: #faf7f1;
+  border-style: dashed;
+}
+
+/* Country popover: a search box over a scrolling list — the same shape as
+   the preset dropdown in the masthead, just anchored to the flag instead. */
+#country-menu {
+  position: absolute;
+  top: calc(100% + 3px);
+  right: 0;
+  z-index: 40;
+  width: 220px;
+  background: #fff;
+  border: 1px solid var(--edge);
+}
+
+#country-menu[hidden] {
+  display: none;
+}
+
+#country-search {
+  display: block;
+  width: 100%;
+  border: none;
+  border-bottom: 1px solid var(--hair);
+  padding: 4px 8px;
+}
+
+/* The vh cap keeps the list clear of the masthead on a short window, where a
+   flat 260px would open past the top of the screen. */
+#country-list {
+  max-height: min(260px, 40vh);
+  overflow-y: auto;
+}
+
+.country-item {
+  padding: 4px 8px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+}
+
+.country-item:hover {
+  background: var(--sel-row);
+}
+
+#meta {
+  padding: 0 9px 6px 29px;
+  color: var(--soft);
+  font-size: 10px;
+}
+
+.stats {
+  border-top: 1px solid var(--hair);
+}
+
+.srow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 9px;
+  border-bottom: 1px solid #eef1f4;
+}
+
+.srow .lbl {
+  flex: none;
+  width: 96px;
+  color: var(--soft);
+  font-size: 10px;
+}
+
+.srow .val {
+  flex: 1;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.srow .val b {
   font-size: 11px;
 }
 
-/* Wraps because a foreign unit shows three buttons, which don't fit the
-   210px column on one row; the section min-height already budgets for the
-   second row, so the wrap never changes the panel height. */
-.panel-actions {
-  align-self: flex-start;
-  margin-top: 4px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+.srow .val .d,
+.srow .val b.d {
+  color: var(--dem);
 }
 
-/* The stats spread across the bar as label-over-value blocks; the grid
-   re-wraps them into fewer columns as the window narrows. */
-.panel-stats {
-  flex: 1;
-  min-width: 0;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(108px, 1fr));
-  gap: 8px 14px;
-  align-content: center;
-  border-left: 1px solid var(--line);
-  padding-left: 16px;
+.srow .val .r,
+.srow .val b.r {
+  color: var(--gop);
 }
 
-.stat {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.stat-label {
-  color: var(--muted);
+.srow .rk {
+  flex: none;
+  width: 78px;
+  text-align: right;
+  color: var(--soft);
   font-size: 10px;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
-/* Empty values and chips (before the first selection fills them in) keep
-   their line's height, so a stat block is the same size filled or not. */
-.stat b {
-  font-size: 13px;
-  min-height: 18px;
-}
+/* Inline row marks ride just before the value: the lean gauge, the
+   seat/vote dot matrix. No scaled bars here — a bar with nothing beside it
+   to compare against says nothing; those live in the rankings list, where
+   every state's sits next to every other's. */
 
-.stat .rank-chip {
-  min-height: 15px;
-}
-
-/* Per-stat visuals. Every kind — bar, dial, dot grid — fills the same 28px
-   band, so all stat blocks (and with them the panel) share one height no
-   matter which state is selected. */
-
-/* Bars are scaled against the current leader, like the rankings list. */
-.stat-bar {
-  width: 100%;
-  max-width: 120px;
+/* The lean gauge: D+30 at the left end, R+30 at the right, needle clamped
+   (positioned from main.js). */
+.gauge {
+  position: relative;
+  display: inline-flex;
+  width: 54px;
   height: 8px;
-  margin: 10px 0;
-  background: #f0f2f5;
-  overflow: hidden;
+  border: 1px solid #667085;
+  vertical-align: -1px;
+  margin-right: 6px;
 }
 
-.stat-bar i {
+.gauge i {
   display: block;
   height: 100%;
-  background: #9fb6d4;
+  flex: 1;
 }
 
-.stat-dial {
-  width: 52px;
-  height: 28px;
+.gauge .gd {
+  background: #bcd2f7;
 }
 
-/* One dot per House seat or electoral vote; the column count, dot size and
-   gap come inline from the band-fitting in main.js. */
+.gauge .gr {
+  background: #f7c6c0;
+}
+
+.gauge::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: #fff;
+}
+
+.gauge b {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  background: var(--ink);
+}
+
+/* One dot per electoral vote, a small matrix inline before the number; the
+   column count, dot size and gap come from the band-fitting in main.js. */
 .stat-dots {
-  height: 28px;
-  display: grid;
+  display: inline-grid;
   justify-content: start;
   align-content: center;
+  vertical-align: middle;
+  margin-right: 6px;
 }
 
 .stat-dots i {
@@ -820,117 +1058,120 @@ button.dot:disabled {
   border-radius: 50%;
 }
 
-#d-seats i {
-  background: #5f6b7a;
-}
-
 #d-ev i {
-  background: #7d66ba;
+  background: #6741d9;
 }
 
 /* race/ethnicity breakdown */
 
-#race-wrap {
-  flex: none;
-  width: 260px;
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  border-left: 1px solid var(--line);
-  padding-left: 16px;
+.race-wrap {
+  padding: 6px 9px 8px;
 }
 
-/* Hidden (a unit with no race data) keeps its footprint, like the panel
-   sections above: removing the column would widen the stats grid, re-wrap it
-   into fewer rows, and change the panel height — the map above would jump. */
-#race-wrap[hidden] {
-  visibility: hidden;
+.race-wrap[hidden] {
+  display: none;
 }
 
-/* 100 dots, one per person in a hundred, ten to a row. */
-#race-grid {
-  flex: none;
+.race-wrap .cap {
+  font-size: 9px;
+  letter-spacing: 0.8px;
+  color: var(--soft);
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+/* 100 dots, one per person in a hundred, in a three-row band — colour runs
+   along the short dimension: columns fill top to bottom, then advance, so a
+   ten-dot category bunches into 3x3+1 instead of stretching into a strip. */
+.race-grid {
   display: grid;
-  grid-template-columns: repeat(10, 8px);
+  grid-auto-flow: column;
+  grid-template-rows: repeat(3, 7px);
+  grid-auto-columns: 7px;
   gap: 2px;
+  justify-content: start;
 }
 
-#race-grid i {
-  width: 8px;
-  height: 8px;
+.race-grid i {
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
 }
 
-#race-legend {
-  min-width: 0;
+.race-legend {
+  margin-top: 5px;
   display: flex;
-  flex-direction: column;
-  gap: 3px;
-  color: var(--muted);
-  font-size: 11px;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  color: var(--soft);
+  font-size: 9px;
   white-space: nowrap;
 }
 
-#race-legend i {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  margin-right: 5px;
+.race-legend > span {
+  display: flex;
+  align-items: center;
+}
+
+.race-legend i {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin-right: 4px;
   border-radius: 50%;
 }
 
-/* elections card */
-
-.mini-head {
-  font-size: 11px;
-  margin: 0;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+#actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 7px 9px;
+  border-top: 1px solid var(--hair);
+  background: #fff;
 }
 
-#elections .mini-head {
-  margin-bottom: 6px;
+/* elections box */
+
+#elections[hidden] {
+  display: none;
 }
 
-.e-row {
+#ebox {
+  padding: 8px 9px 7px;
+}
+
+#erow {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin: 4px 0;
+  gap: 7px;
 }
 
-.e-label {
-  width: 56px;
-  color: var(--muted);
+.ecap {
   flex: none;
-}
-
-.e-d,
-.e-r {
-  width: 26px;
-  flex: none;
+  font-size: 12px;
+  width: 52px;
   font-variant-numeric: tabular-nums;
 }
 
-.e-d {
-  color: #3568b8;
+.ecap.d {
+  color: var(--dem);
+}
+
+.ecap.r {
+  color: var(--gop);
   text-align: right;
 }
 
-.e-r {
-  color: #bf4040;
-}
-
-.e-d.win,
-.e-r.win {
-  font-weight: 700;
+.ecap.win {
+  font-weight: bold;
 }
 
 .ebar {
   flex: 1;
   display: flex;
-  height: 12px;
-  background: #eee;
+  height: 14px;
+  border: 1px solid #667085;
+  background: #e9ecf2;
   position: relative;
   overflow: hidden;
 }
@@ -941,15 +1182,15 @@ button.dot:disabled {
 }
 
 .ebar .ed {
-  background: #5b8ed6;
+  background: var(--dem);
 }
 
 .ebar .ex {
-  background: #c9c9c9;
+  background: #c6cdd8;
 }
 
 .ebar .er {
-  background: #d66a5b;
+  background: var(--gop);
 }
 
 /* majority tick */
@@ -957,102 +1198,144 @@ button.dot:disabled {
   content: "";
   position: absolute;
   left: 50%;
-  top: 0;
-  bottom: 0;
+  top: -1px;
+  bottom: -1px;
   width: 1px;
-  background: #333;
+  background: var(--ink);
 }
 
 .e-note {
   margin: 6px 0 0;
-  color: var(--muted);
+  color: var(--soft);
   font-size: 10px;
   line-height: 1.5;
 }
 
-/* rankings */
+/* rankings listview */
 
 #rankings {
-  display: flex;
-  flex-direction: column;
-  min-height: 200px;
   flex: 1;
+  min-height: 120px;
 }
-
-.rank-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 6px;
-}
-
 
 #rank-stat {
-  font: inherit;
-  font-size: 11px;
-  padding: 2px 4px;
-  border: 1px solid var(--line-strong);
-  background: #fff;
+  font-size: 10px;
+  padding: 1px 2px;
+}
+
+#lvhead {
+  flex: none;
+  display: flex;
+  align-items: center;
+  background: var(--strip);
+  border-bottom: 1px solid var(--face-lo);
+  font-size: 10px;
+  color: var(--ink);
+}
+
+#lvhead span {
+  padding: 3px 6px;
+  border-right: 1px solid #e0e5eb;
+  white-space: nowrap;
+}
+
+#lvhead .c-pos {
+  width: 30px;
+  text-align: right;
+  flex: none;
+}
+
+#lvhead .c-chg {
+  width: 34px;
+  text-align: right;
+  flex: none;
+}
+
+#lvhead .c-sw {
+  width: 21px;
+  flex: none;
+}
+
+#lvhead .c-nm {
+  flex: 1;
+  min-width: 0;
+}
+
+#lvhead .c-bar {
+  width: 48px;
+  flex: none;
+}
+
+#lvhead .c-val {
+  width: 70px;
+  text-align: right;
+  flex: none;
+  border-right: none;
 }
 
 #rank-list {
   list-style: none;
   margin: 0;
   padding: 0;
-  overflow: auto;
+  overflow-y: scroll;
   flex: 1;
+  min-height: 0;
 }
 
 #rank-list li {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 2px 4px;
-  border: 1px solid transparent;
   cursor: pointer;
+  line-height: 1.3;
+  padding: 2px 0;
+}
+
+#rank-list li:nth-child(even) {
+  background: #f3f5f9;
 }
 
 #rank-list li:hover {
-  background: var(--hover);
+  background: #e9eef8;
 }
 
 #rank-list li.sel {
-  background: var(--sel);
-  border-color: var(--text);
+  background: var(--sel-row);
 }
 
+#rank-list li.sel .nm,
 #rank-list li.changed .nm {
-  font-weight: 700;
+  font-weight: bold;
 }
 
 #rank-list .pos {
-  width: 22px;
+  width: 30px;
+  padding-right: 6px;
   text-align: right;
-  color: var(--muted);
-  font-size: 11px;
+  color: var(--soft);
+  font-size: 10px;
   flex: none;
 }
 
 #rank-list .chg-wrap {
-  width: 28px; /* fits a two-digit delta ("▼12") without overflowing */
+  width: 34px;
+  padding-right: 6px;
   flex: none;
-  font-size: 11px;
-  font-weight: 700;
+  font-size: 10px;
+  font-weight: bold;
   text-align: right;
 }
 
 #rank-list .chg.up {
-  color: #2a9d5c;
+  color: #15803d;
 }
 
 #rank-list .chg.down {
-  color: #d6483f;
+  color: var(--gop);
 }
 
 #rank-list .chg.same {
-  color: var(--muted);
-  font-weight: 400;
+  color: #98a2b3;
+  font-weight: normal;
 }
 
 #rank-list .chg.new {
@@ -1060,8 +1343,10 @@ button.dot:disabled {
 }
 
 #rank-list .dot {
-  width: 9px;
-  height: 9px;
+  width: 10px;
+  height: 10px;
+  margin: 0 6px 0 5px;
+  border: 1px solid rgba(16, 24, 40, 0.4);
 }
 
 #rank-list .nm {
@@ -1070,6 +1355,7 @@ button.dot:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  padding-right: 6px;
 }
 
 /* mini scaled bars */
@@ -1077,6 +1363,7 @@ button.dot:disabled {
   flex: none;
   width: 48px;
   height: 8px;
+  border: 1px solid #a6aebc;
   background: #f0f2f5;
   position: relative;
   overflow: hidden;
@@ -1087,7 +1374,7 @@ button.dot:disabled {
   top: 0;
   bottom: 0;
   left: 0;
-  background: #9fb6d4;
+  background: #bcd2f7;
 }
 
 #rank-list .bar.diverge::after {
@@ -1097,85 +1384,158 @@ button.dot:disabled {
   top: 0;
   bottom: 0;
   width: 1px;
-  background: #bbb;
+  background: #a6aebc;
 }
 
 #rank-list .bar .bd {
   left: 50%;
-  background: #5b8ed6;
+  background: #bcd2f7;
 }
 
 #rank-list .bar .br {
   left: auto;
   right: 50%;
-  background: #d66a5b;
+  background: #f7c6c0;
 }
 
 #rank-list .val {
-  color: var(--muted);
+  color: #1d2939;
   flex: none;
-  width: 64px;
+  width: 70px;
+  padding: 0 6px 0 4px;
   text-align: right;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
-#sources {
-  color: var(--muted);
-  font-size: 10px;
-  padding: 6px 10px;
-  line-height: 1.5;
+/* --------------------------------------------------------- sources dialog */
+
+#srcdlg {
+  position: fixed;
+  z-index: 100;
+  left: 50%;
+  top: 34%;
+  transform: translate(-50%, -50%);
+  width: 400px;
+  max-width: calc(100vw - 20px);
+  background: #fff;
+  border: 1px solid var(--edge);
+  outline: 3px solid var(--strip);
 }
 
-/* ---------------------------------------------------------- mid widths */
+#srcdlg[hidden] {
+  display: none;
+}
 
-/* Below ~1240px the sidebar still fits beside the map, but the state panel's
-   single row no longer does: after the fixed identity (210px) and race
-   (260px) columns the stats grid drops under two columns and stacks all nine
-   stats vertically. Re-stack the panel instead — identity row on top, stats
-   grid full width, race block last — the same arrangement the phone layout
-   uses. The panel's height now changes with the selection (the keep-footprint
-   overlay would leave a tall blank block under the map when nothing is
-   selected), so the map resizes on select/deselect at these widths. */
-@media (max-width: 1240px) {
-  #state-panel section {
-    min-height: 0;
-    flex-wrap: wrap;
-  }
+.dlg-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--chrome);
+  color: #fff;
+  font: bold 11px var(--ui);
+  letter-spacing: 1px;
+  padding: 4px 4px 4px 9px;
+}
 
-  #state-panel section[hidden] {
-    display: none;
-    visibility: visible;
-  }
+.dlg-title button {
+  width: 17px;
+  height: 15px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid #47536b;
+  font: bold 11px/1 var(--ui);
+  color: #fff;
+  cursor: pointer;
+}
 
-  .panel-id {
-    width: 100%;
-  }
+.dlg-body {
+  padding: 10px 12px;
+  font-size: 10px;
+  line-height: 1.7;
+  color: #1d2939;
+}
 
-  .panel-stats {
-    flex: 1 1 100%;
-    border-left: none;
-    padding-left: 0;
-  }
+.dlg-foot {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 10px 10px;
+}
 
-  #race-wrap {
-    width: auto;
-    border-left: none;
-    padding-left: 0;
-  }
+.dlg-foot .btn {
+  min-width: 64px;
+  justify-content: center;
+}
 
-  #race-wrap[hidden] {
-    display: none;
-  }
+/* ------------------------------------------------------------ statusbar */
+
+#statusbar {
+  flex: none;
+  display: flex;
+  gap: 3px;
+  padding: 3px 9px 6px;
+  background: var(--page);
+}
+
+#statusbar .cell {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  font-size: 10px;
+  color: #344054;
+  border: 1px solid #d0d7e0;
+  background: #fff;
+  white-space: nowrap;
+}
+
+#statusbar .grow {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+#statusbar .mono {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  min-width: 170px;
+  justify-content: flex-end;
+}
+
+/* ----------------------------------------------------------- scrollbars */
+
+::-webkit-scrollbar {
+  width: 15px;
+  height: 15px;
+}
+
+::-webkit-scrollbar-track {
+  background: #eaedf2;
+  border-left: 1px solid #d5dae2;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #c2cbd8;
+  border: 1px solid #aeb9c9;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #aeb9c9;
+}
+
+* {
+  scrollbar-width: auto;
+  scrollbar-color: #c2cbd8 #eaedf2;
 }
 
 /* ------------------------------------------------------- narrow screens */
 
-/* Phones: the map fills the screen under the header, and the state panel and
-   rankings live in a bottom sheet (#tray) that peeks above the bottom edge
-   and pulls up over the map — the Zillow arrangement. The page itself never
-   scrolls; the sheet's content does. main.js reads the same 800px cutoff to
-   start the AK/HI inset boxes closed and to scale them down. */
+/* Phones: the map fills the screen under the masthead, and the sidebar lives
+   in a bottom sheet (#tray) that peeks above the bottom edge and pulls up
+   over the map — the Zillow arrangement. The page itself never scrolls; the
+   sheet's content does. main.js reads the same 800px cutoff to start the
+   AK/HI inset boxes closed and to scale them down. */
 @media (max-width: 800px) {
   :root {
     /* The peek is the grab-handle bar plus a cut-off sliver of the sheet's
@@ -1184,48 +1544,39 @@ button.dot:disabled {
     --tray-handle: 44px;
   }
 
-  /* The padding keeps the map viewport clear of the sheet's collapsed peek
-     bar, so no map furniture ever hides behind it. The sheet itself is
-     positioned inside <main> (not the viewport): open it covers exactly the
-     map area — everything below the header, whose wrapped height varies —
-     and closed, its off-screen part is clipped here instead of extending
-     the page. */
-  main {
-    display: flex;
-    flex-direction: column;
-    padding-bottom: var(--tray-peek);
-    position: relative;
-    overflow: hidden;
-  }
-
-  #map-wrap {
+  /* The search takes the masthead's width; the wordmark steps down. */
+  .findwrap {
     flex: 1;
-    min-height: 0;
-  }
-
-  .tagline {
-    display: none;
-  }
-
-  .brand {
     min-width: 0;
-    flex: none;
-  }
-
-  /* The search drops to its own full-width row (the header already wraps). */
-  .preset-box {
-    flex: 1 1 100%;
   }
 
   #preset-search {
     width: 100%;
-    max-width: none;
   }
 
-  /* The panel re-stack itself comes from the mid-widths query above; only
-     the tighter padding is phone-specific. */
-  #state-panel section {
-    padding: 8px 10px;
+  #preset-menu {
+    width: 100%;
+  }
+
+  #wordmark h1 {
+    font-size: 11px;
+    letter-spacing: 1.5px;
+  }
+
+  #tabrow {
+    flex-wrap: wrap;
+  }
+
+  /* The padding keeps the map viewport clear of the sheet's collapsed peek
+     bar, so no map furniture ever hides behind it. The sheet itself is
+     positioned inside <main> (not the viewport): open it covers exactly the
+     map area — everything below the masthead — and closed, its off-screen
+     part is clipped here instead of extending the page. */
+  main {
+    flex-direction: column;
+    padding: 6px 6px var(--tray-peek);
+    position: relative;
+    overflow: hidden;
   }
 
   /* --------------------------------------------------------- the tray */
@@ -1239,7 +1590,7 @@ button.dot:disabled {
     bottom: 0;
     height: 100%;
     background: #fff;
-    border-top: 1px solid var(--line-strong);
+    border-top: 1px solid var(--edge);
     /* The sheet floats over the map, so it should read as one. */
     box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.15);
     z-index: 30;
@@ -1268,7 +1619,7 @@ button.dot:disabled {
     border: none;
     background: none;
     font: inherit;
-    color: var(--text);
+    color: var(--ink);
     cursor: pointer;
     /* The drag on the handle steers the sheet, never the page. */
     touch-action: none;
@@ -1299,34 +1650,26 @@ button.dot:disabled {
     touch-action: none;
   }
 
-  /* flex: none over the desktop min-height: 0 — otherwise the sidebar
-     squashes to fit the sheet, the rank list paints past it as visible
-     overflow, and #sources lands mid-list with rows sliding under it. Here
-     the content is one flowing column and #tray-content is the one
-     scroller, so #sources sits below the ranking at the very bottom. */
+  /* The sheet's content is the one scroller; the boxes just flow. */
   #sidebar {
-    grid-area: auto;
-    border-left: none;
-    border-top: 1px solid var(--line);
+    width: auto;
     flex: none;
-    overflow: visible;
+    padding: 0 6px 6px;
   }
 
-  /* The sheet's content is the one scroller; the rankings list just flows. */
   #rankings {
     min-height: 0;
   }
 
   #rank-list {
-    overflow: visible;
+    overflow-y: visible;
   }
 
-  /* The banners can't hang centered at the top: the Atlas/Data toggle sits at
-     top-left 8px and would collide, and the nowrap hint runs past a phone
-     screen. Below the toggle, full width, wrapping. */
+  /* The banners can't hang centered at the top: the nowrap hint runs past a
+     phone screen. Full width, wrapping. */
   #paint-banner,
   #carve-banner {
-    top: 40px;
+    top: 8px;
     left: 8px;
     right: 8px;
     transform: none;
@@ -1345,13 +1688,13 @@ button.dot:disabled {
 
   /* Stays below the relocated banner. */
   #map-note {
-    top: 76px;
+    top: 48px;
   }
 
-  /* Clears the Reset view/Alaska/Hawaii row, which the data-view legend
-     otherwise overlaps on a phone-width map. */
-  #map-legend {
-    bottom: 42px;
+  /* The camera readout is developer furniture; the phone statusbar keeps
+     the hints and counts. */
+  #statusbar .mono {
+    display: none;
   }
 }
 
@@ -1361,24 +1704,29 @@ button.dot:disabled {
    so iOS doesn't auto-zoom the page when one takes focus. */
 @media (pointer: coarse) {
   .btn {
-    padding: 8px 12px;
+    padding: 7px 12px;
   }
 
   .btn-small {
     padding: 6px 10px;
-    font-size: 12px;
+    font-size: 11px;
   }
 
-  #view-toggle button {
-    padding: 8px 12px;
+  .tab {
+    padding: 8px 16px 7px;
+  }
+
+  .tray-tab {
+    padding: 6px 12px 7px;
+    font-size: 11px;
   }
 
   #rank-list li {
-    padding: 6px 4px;
+    padding: 6px 0;
   }
 
   #rank-stat {
-    padding: 6px;
+    padding: 4px;
   }
 
   #preset-search,
@@ -1393,5 +1741,55 @@ button.dot:disabled {
   .swatch {
     width: 24px;
     height: 24px;
+  }
+
+  .flag-btn {
+    width: 30px;
+    height: 22px;
+  }
+
+  #country-search {
+    font-size: 16px;
+    padding: 8px;
+  }
+
+  .country-item {
+    padding: 8px;
+  }
+}
+
+/* ---------------------------------------------------------------- print */
+
+/* The Print button hands the page to the browser as it stands: the map
+   canvas prints at its current view. Interactive chrome — toolbars, the
+   search well, the statusbar, buttons — comes off so what lands on paper
+   is the plate and the sidebar's numbers under the letterhead. */
+@media print {
+  #tabrow,
+  .findwrap,
+  #statusbar,
+  #inset-tools,
+  #reset-view,
+  #actions,
+  #paint-banner,
+  #carve-banner,
+  #map-note,
+  #tooltip,
+  #srcdlg {
+    display: none;
+  }
+
+  body,
+  #app {
+    overflow: visible;
+  }
+
+  #map-wrap {
+    border-color: #000;
+  }
+
+  #sidebar,
+  #rank-list {
+    overflow: visible;
   }
 }

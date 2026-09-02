@@ -32,6 +32,7 @@ import { createUnitIndex } from "./pick.js";
 import { createGlobeLabels } from "./labels.js";
 import { createCarver, toXyz } from "./carve.js";
 import { createUnitPool } from "./dynamic.js";
+import { createCities, loadCities } from "./cities.js";
 import { COLORS } from "./layers.js";
 
 const RAD = Math.PI / 180;
@@ -57,14 +58,27 @@ export async function createGlobeMap({ canvas, features, carve: carveOpts }) {
 
   const geometry = await loadGeometry(gl);
   const camera = createCamera(geometry.camera);
-  const renderer = createRenderer(gl, geometry, camera);
-  const units = await loadUnits({ manifest: geometry.manifest, features });
+  // Two independent downloads, so they overlap rather than queue.
+  const [units, cityData] = await Promise.all([
+    loadUnits({ manifest: geometry.manifest, features }),
+    loadCities(),
+  ]);
   const unitIndex = createUnitIndex(units);
   const labels = createGlobeLabels(gl, {
     units,
     camera,
     globeScale: geometry.camera.globeScale,
   });
+  // After the labels, and from their atlas: the two label sets share one field
+  // texture. unitIndex is how a city finds the county it stands in, and so the
+  // state whose capital it may be.
+  const cities = createCities(gl, {
+    camera,
+    atlas: labels.atlas,
+    cities: cityData,
+    unitIndex,
+  });
+  const renderer = createRenderer(gl, geometry, camera, { cities });
 
   const unitOf = new Map(units.map((u, i) => [u.id, i]));
   const { globeScale, globeTranslate, homeRotation } = geometry.camera;
@@ -428,7 +442,7 @@ export async function createGlobeMap({ canvas, features, carve: carveOpts }) {
   // One pass over the units per model change. Three texels each and no
   // geometry: this is the whole of "repaint the map" now.
 
-  function paint({ assign, stateOrder, fillOf, bandOf, isForeign, selected }) {
+  function paint({ assign, stateOrder, fillOf, bandOf, isForeign, countryOf, selected }) {
     const one = (unit, sid) => {
       if (sid === undefined) {
         // A county the app has retired — carved into pieces, which draw from
@@ -444,6 +458,7 @@ export async function createGlobeMap({ canvas, features, carve: carveOpts }) {
       renderer.setUnitOwner(unit, stateOrder.get(sid) ?? 0xfffe, {
         alien: isForeign(sid),
         chosen: sid === selected,
+        country: countryOf(sid),
       });
     };
     for (let u = 0; u < geometry.unitCount; u++) one(u, assign.get(units[u].id));
@@ -528,14 +543,32 @@ export async function createGlobeMap({ canvas, features, carve: carveOpts }) {
 
   let pending = 0;
   let labelsOn = true;
-  const drawLabels = () => {
+  // `dim` comes from the renderer, which knows how far the city names have
+  // come up. See the end of drawScene.
+  const drawLabels = (dim) => {
     if (!labelsOn) return;
     labels.prepare();
-    labels.draw();
+    labels.draw(dim);
   };
+
+  // The camera readout. Keyed off the camera's own version counter, so the
+  // frames that only moved the pointer — the common case, one per mouse move —
+  // do not unproject or touch the DOM at all.
+  const debugBox = document.getElementById("map-debug");
+  let debugVersion = -1;
+  function updateDebug() {
+    const v = camera.view;
+    if (v.version === debugVersion) return;
+    debugVersion = v.version;
+    const at = camera.unproject(v.cssWidth / 2, v.cssHeight / 2);
+    const where = at ? `${at[1].toFixed(3)}, ${at[0].toFixed(3)}` : "off globe";
+    debugBox.textContent = `${where}  ·  zoom ${v.k.toFixed(2)}`;
+  }
+
   function frame() {
     pending = 0;
     renderer.draw(drawLabels);
+    if (debugBox) updateDebug();
   }
   function requestDraw() {
     if (!pending) pending = requestAnimationFrame(frame);
@@ -576,6 +609,9 @@ export async function createGlobeMap({ canvas, features, carve: carveOpts }) {
       // The layout itself is cached against assignVersion inside labels.js;
       // this only re-runs when territory or a name has actually moved.
       labels.update(args);
+      // Same signal, same reason: which city is a state's capital depends on
+      // which counties the state holds, so it moves when the assignment does.
+      cities.update(args);
       renderer.invalidate();
     },
     setView(next) {

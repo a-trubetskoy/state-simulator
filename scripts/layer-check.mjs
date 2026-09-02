@@ -22,7 +22,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p) => readFileSync(join(root, p), "utf8");
 
 const { buildLayers, BAND_GROUPS, MODE } = await import("../src/globe/layers.js");
-const { MAX_ZOOM } = await import("../src/globe/camera.js");
+const { MAX_ZOOM, MIN_ZOOM } = await import("../src/globe/camera.js");
 const S = await import("../src/globe/shaders.js");
 
 let failed = 0;
@@ -80,7 +80,17 @@ ok("every band group is a line group", BAND_GROUPS.every((g) => manifest.lines[g
 // Anything that reads the two sides of a segment has to be drawn from a group
 // that carries a unit pair. Every compiled line group does; the check is here
 // so a new group without one cannot quietly join a mode that needs it.
-const paired = new Set(BAND_GROUPS.concat(["countyArcs", "seams", "coast", "lakeshore", "border"]));
+const paired = new Set(
+  BAND_GROUPS.concat([
+    "countyArcs",
+    "seams",
+    "countyArcsCoarse",
+    "seamsCoarse",
+    "coast",
+    "lakeshore",
+    "border",
+  ])
+);
 const unpaired = layers
   .filter((l) => l.mode && l.mode !== MODE.plain)
   .flatMap((l) => groupsOf(l).filter((g) => !paired.has(g)));
@@ -148,6 +158,59 @@ ok(
   lakeFills.length === lakeShores.length && mismatched.length === 0,
   mismatched.join("; ")
 );
+
+// ------------------------------------------------------------- detail tiers
+
+// A `tier` is one layer written as several, each drawing the same thing at a
+// different level of detail over its own stretch of the zoom. The renderer
+// switches between them on a hard edge, so the stretches have to tile the whole
+// zoom range: a gap is a zoom at which the layer is simply missing, and an
+// overlap draws two copies of one line over each other — which for a
+// half-alpha hairline is the doubled weight the tiers exist to remove. Neither
+// looks like an error on screen, so it is checked here.
+//
+// The style has to match too. Two tiers that differ in colour or width turn
+// what should be an invisible swap into a flash at the crossover.
+console.log("\ndetail tiers");
+const tiers = new Map();
+for (const l of layers) {
+  if (!l.tier) continue;
+  if (!tiers.has(l.tier)) tiers.set(l.tier, []);
+  tiers.get(l.tier).push(l);
+}
+ok("at least one layer is written as detail tiers", tiers.size > 0);
+for (const [name, group] of tiers) {
+  const ranges = group
+    .map((l) => [l.zoom?.[0] ?? MIN_ZOOM, l.zoom?.[1] ?? MAX_ZOOM])
+    .sort((a, b) => a[0] - b[0]);
+  ok(
+    `every "${name}" tier has a zoom range (${group.length} tiers)`,
+    group.every((l) => Array.isArray(l.zoom) && l.zoom.length === 2)
+  );
+  let cursor = MIN_ZOOM;
+  const breaks = [];
+  for (const [k0, k1] of ranges) {
+    if (k0 !== cursor) breaks.push(`${cursor} -> ${k0}`);
+    if (!(k1 > k0)) breaks.push(`empty range at ${k0}`);
+    cursor = k1;
+  }
+  if (cursor !== MAX_ZOOM) breaks.push(`stops at ${cursor}, not ${MAX_ZOOM}`);
+  ok(
+    `the "${name}" tiers tile ${MIN_ZOOM} to ${MAX_ZOOM} with no gap or overlap`,
+    breaks.length === 0,
+    breaks.join("; ")
+  );
+
+  const styles = new Set(
+    group.map((l) => JSON.stringify([l.kind, l.color, l.colorB ?? null, l.width ?? null, l.mode ?? 0]))
+  );
+  ok(`the "${name}" tiers are the same line at every zoom`, styles.size === 1, [...styles].join(" vs "));
+
+  // Two tiers naming the same geometry would draw the same detail on both sides
+  // of the crossover, which is a tier that quietly does nothing.
+  const named = group.flatMap(groupsOf);
+  ok(`no group serves two "${name}" tiers`, new Set(named).size === named.length, named.join(", "));
+}
 
 // ------------------------------------------------------------- zoom growth
 

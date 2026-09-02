@@ -40,7 +40,15 @@
 
 import * as S from "./shaders.js";
 import { compile } from "./shaders.js";
-import { buildLayers, BAND_GROUPS, COLORS, MODE } from "./layers.js";
+import {
+  buildLayers,
+  BAND_GROUPS,
+  COLORS,
+  MODE,
+  STATE_LABEL_DIM,
+  STATE_LABEL_FADE,
+  rampAt,
+} from "./layers.js";
 import { createDynamicFills, createDynamicLines } from "./dynamic.js";
 
 // Unit ids a carve may hand out, above the compiled units. The sentinels sit at
@@ -48,7 +56,7 @@ import { createDynamicFills, createDynamicLines } from "./dynamic.js";
 // when a county is recut, so it bounds how many pieces exist at once.
 const PIECE_UNITS = 4096;
 
-export function createRenderer(gl, geometry, camera) {
+export function createRenderer(gl, geometry, camera, { cities = null } = {}) {
   const prog = {
     disc: compile(gl, S.DISC_VS, S.DISC_FS),
     fill: compile(gl, S.FILL_VS, S.FILL_FS),
@@ -59,7 +67,7 @@ export function createRenderer(gl, geometry, camera) {
   // Two masks share the stencil buffer, so they take a bit each rather than a
   // value each. They do not overlap in time today — the aprons consume the
   // nation's mask before the band writes its own — but a bit apiece costs
-  // nothing and means neither pass depends on that staying true.
+  // nothing and means no pass depends on that staying true.
   const NATION_BIT = 0x01;
   const BAND_BIT = 0x02;
 
@@ -192,9 +200,8 @@ export function createRenderer(gl, geometry, camera) {
     invalidate();
   };
 
-  // state index (16 bits) and the flags, laid out to match ownerOf() in
-  // shaders.js. Alpha is unused and stays opaque so the texel is easy to read
-  // back in a debugger.
+  // state index (16 bits), the flags, and the country index, laid out to match
+  // ownerOf() in shaders.js.
   const setUnitOwner = setColor(attrTable);
   const ATTR_ALIEN = 1;
   const ATTR_CHOSEN = 2;
@@ -228,6 +235,10 @@ export function createRenderer(gl, geometry, camera) {
   // reordering the list cannot detach a layer from its own visibility.
   const layers = buildLayers();
   for (const l of layers) l.enabled = true;
+  // Found once. The state labels dim on this layer's fade, and drawScene asks
+  // it every frame — see the end of that function for why it is the layer and
+  // not the zoom that is consulted.
+  const cityLayer = layers.find((l) => l.kind === "cities");
 
   // C7. The two switches the app throws at the whole stack, and the one colour
   // that follows the selection. Everything else a layer needs to know is either
@@ -244,11 +255,17 @@ export function createRenderer(gl, geometry, camera) {
   // the scene texture is cached against it), so this costs nothing but the
   // arithmetic: no extra pass, no per-instance test, and a tier that has not
   // arrived is a draw call that never runs.
-  const fadeAt = (layer) => {
-    if (!layer.fadeIn) return 1;
-    const [k0, k1] = layer.fadeIn;
-    return Math.max(0, Math.min(1, (camera.view.k - k0) / (k1 - k0)));
-  };
+  const fadeAt = (layer) => (layer.fadeIn ? rampAt(camera.view.k, layer.fadeIn) : 1);
+
+  // The same, for the part of a layer that belongs to the SELECTED state, where
+  // `showWhenSelected` suspends the fade. It is a second alpha and not a lift on
+  // the layer's own because the two answer different questions: the fade asks
+  // whether the view is close enough for this layer to mean anything, and a
+  // selection answers that for the state asked about — not for the rest of the
+  // world. Only the cities carry the flag, and cities.js draws its two halves at
+  // the two alphas; every other layer has one part and one fade.
+  const selectedFadeAt = (layer) =>
+    layer.showWhenSelected && view.selected ? 1 : fadeAt(layer);
 
   // How wide a layer draws right now. Widths are in css px and stay there — a
   // stroke measured on the ground would grow sixteenfold across the zoom range
@@ -264,12 +281,29 @@ export function createRenderer(gl, geometry, camera) {
     return layer.width * (1 + (factor - 1) * t);
   };
 
+  // Whether a layer's zoom window is open: `zoom` is [k0, k1), either end null
+  // for no bound. A hard edge, unlike fadeIn, and for a different job — fadeIn
+  // brings in geometry that was not there before, where a ramp is what keeps a
+  // tier of rivers from arriving as a flash. `zoom` switches between two copies
+  // of the SAME line, and there a ramp would be the bug: mid-fade both copies
+  // draw, and two half-alpha strokes along one border stack into the doubled
+  // weight the coarse tier exists to remove. Half-open at the top so two
+  // windows meeting at one k neither gap nor overlap.
+  const inZoom = (layer) => {
+    if (!layer.zoom) return true;
+    const [k0, k1] = layer.zoom;
+    return (k0 == null || camera.view.k >= k0) && (k1 == null || camera.view.k < k1);
+  };
+
   // What a layer draws right now.
   const hidden = (layer) =>
     !layer.enabled ||
     (layer.hideInData && view.dataView) ||
     (layer.mode === MODE.outline && !view.selected) ||
-    fadeAt(layer) === 0;
+    !inZoom(layer) ||
+    // The selected state's fade, so a layer whose own has not opened yet still
+    // runs while it has that state's features to draw.
+    selectedFadeAt(layer) === 0;
   const colorOf = (layer) => {
     const color =
       layer.role === "selection"
@@ -583,10 +617,31 @@ export function createRenderer(gl, geometry, camera) {
         return;
       }
 
+      // The city dots and their names own their own two programs and their own
+      // instance buffers, so this is a handoff rather than a pass: the layer
+      // table decides WHEN and how strongly, cities.js decides what and where.
+      if (layer.kind === "cities") {
+        if (!cities) return; // the harness runs without them
+        // Two alphas, one colour: the layer's own fade for the map at large,
+        // and the selected state's for the cities inside it.
+        cities.prepare(color[3], selectedFadeAt(layer) * layer.color[3]);
+        stats.drawCalls += cities.draw();
+        return;
+      }
+
       if (layer.kind === "line") drawLineGroups(layer, color, scale, center, vw, vh, dpr);
     });
 
-    extras?.();
+    // How much the map's own state labels give way to the city names. The ramp
+    // is STATE_LABEL_FADE's rather than the city layer's, because the cities
+    // arrive far earlier than the point where they can replace a state name —
+    // but it is gated on that layer being VISIBLE, which is what keeps the
+    // atlas type at full weight in the data view, where the cities are dropped
+    // and nothing has arrived to take their place. `cities` is in the test
+    // because the harness runs without them.
+    const yielding =
+      cities && cityLayer && !hidden(cityLayer) ? rampAt(camera.view.k, STATE_LABEL_FADE) : 0;
+    extras?.(1 - (1 - STATE_LABEL_DIM) * yielding);
     gl.bindVertexArray(null);
   }
 
@@ -682,15 +737,16 @@ export function createRenderer(gl, geometry, camera) {
     stats,
     setUnitColor: setColor(fillPalette),
     setBandColor: setColor(bandPalette),
-    // Which state holds a unit, and whether that state is outside the union or
-    // is the selected one. Drives the band, the state borders and the selection
+    // Which state holds a unit, which country that state flies the flag of,
+    // and whether the state is outside the union or is the selected one.
+    // Drives the band, the state and country borders and the selection
     // outline, all in the vertex shader.
-    setUnitOwner: (unit, stateIndex, { alien = false, chosen = false } = {}) =>
+    setUnitOwner: (unit, stateIndex, { alien = false, chosen = false, country = 0 } = {}) =>
       setUnitOwner(unit, [
         stateIndex & 0xff,
         (stateIndex >> 8) & 0xff,
         (alien ? ATTR_ALIEN : 0) | (chosen ? ATTR_CHOSEN : 0),
-        255,
+        country & 0xff,
       ]),
     // The one thing that deliberately does NOT invalidate the scene. That is
     // the whole point: a hover redraws a county, not a continent.

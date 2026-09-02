@@ -1,15 +1,49 @@
 import * as d3 from "d3";
 import { feature, merge, neighbors } from "topojson-client";
-import { Deck, OrthographicView, COORDINATE_SYSTEM } from "@deck.gl/core";
-import {
-  PathLayer,
-  PolygonLayer,
-  ScatterplotLayer,
-  SolidPolygonLayer,
-} from "@deck.gl/layers";
-import { DataFilterExtension, MaskExtension } from "@deck.gl/extensions";
+import { Deck, OrthographicView } from "@deck.gl/core";
+import { PathLayer, SolidPolygonLayer } from "@deck.gl/layers";
 import { PRESETS, resolvePreset, partialCounties } from "./presets.js";
+import { COUNTRY_CODES, FLAG_URL } from "./countries.js";
+import {
+  BACKUP_COLORS,
+  BASE_COLORS,
+  FOREIGN_FILL,
+  FOREIGN_LAND,
+  GRATICULE_LINE,
+  GREY_LAND,
+  HOVER,
+  NO_DATA,
+  OCEAN,
+  OUTLINE_FALLBACK,
+  STATE_LINE,
+  TRANSPARENT,
+  WORLD_LAND,
+  deepOf,
+  dimmed,
+  highlight,
+  rgba,
+} from "./palette.js";
+import {
+  DC_SID,
+  RACE_GROUPS,
+  STAT_DEFS,
+  SYMBOL_STATS,
+  apportion,
+  computeElections,
+  fmtArea,
+  fmtBigMoney,
+  fmtMargin,
+  fmtMoney,
+  fmtMoneyK,
+  fmtPct,
+  fmtPop,
+  fmtYears,
+  ranksFor,
+  sumStats,
+  trimOutliers,
+} from "./stats.js";
 import { createGlobeMap } from "./globe/map.js";
+import { EMPTY, FLAT, createLayerBuilder } from "./layers.js";
 import { createStateLabeler } from "./labels.js";
 import {
   allocatePieces,
@@ -90,24 +124,6 @@ const FOREIGN = new Set(data.foreign ?? []);
 
 // ------------------------------------------------------------------- model
 
-// A small palette of clearly distinct soft fills. States are colored
-// map-style (four-color-theorem spirit): a greedy graph coloring guarantees
-// no two bordering states share a fill. The palette is hand-picked to look
-// good in any arrangement, so avoiding an exact repeat is the only
-// constraint. Custom and admitted states draw from the same palette so the
-// map stays uniform.
-const BASE_COLORS = [
-  "#f3dd88", "#c6d98c", "#b3d1ec", "#f3c2bc", "#d9c7e6", "#f0c792", "#b8e3d6",
-];
-// Reserve fills in the same soft style — pink, periwinkle, spring green —
-// drawn on only when a state's neighbors wear every base color. They stay
-// out of BASE_COLORS so the original map's coloring doesn't change.
-const BACKUP_COLORS = ["#eec2d7", "#c0bfe8", "#abd9ad"];
-
-// DC is a state on the map but not in Congress: no senators, no House seats,
-// and a fixed 3 electoral votes (23rd Amendment).
-const DC_SID = "11";
-
 const origAssign = new Map(counties.map((c) => [c.id, c.properties.st]));
 let assign = new Map(origAssign);
 
@@ -153,13 +169,34 @@ const stateNeighbors = new Map(); // state fips -> Set of bordering state fips
   }
 }
 
-// Foreign units all share one near-white wash of the classic atlas tan: the
-// convention for "on the map, but not in the union", kept faint enough to
-// read as unpainted. Painting their territory into a state is what gives it
-// a real color.
-const FOREIGN_FILL = "#faf7f1";
 
-const stateInfo = new Map(); // stateId -> { name, origName, color, custom, foreign }
+// A state's country: an ISO 3166-1 alpha-2 code, "US", or null for a state
+// that's declared itself independent. The flag menu (see setCountry) is the
+// one place this is read or written; every other consumer of a state's
+// political status still goes through the `foreign` boolean it's kept in
+// sync with, exactly as before this existed.
+const REGION_NAMES = new Intl.DisplayNames(["en"], { type: "region" });
+const countryName = (code) => REGION_NAMES.of(code);
+// A real flag for a real country; independent gets a blank swatch in the
+// app's own foreign tan instead of a flag that doesn't exist.
+const flagIconHtml = (code) =>
+  code ? `<img class="flag-icon" src="${FLAG_URL[code]}" alt="" />` : `<span class="flag-icon independent"></span>`;
+
+// The foreign units' real-world country, for the flag each starts with. A
+// Canadian census division or Mexican state shares its country's code; every
+// other foreign id is the ISO 3166-1 alpha-3 code data:foreign ships (see
+// scripts/na-unit-data.mjs) and maps to the alpha-2 code the flag picker uses.
+const FOREIGN_ALPHA3_TO_ALPHA2 = {
+  CRI: "CR", NIC: "NI", MAF: "MF", SXM: "SX", HTI: "HT", DOM: "DO", SLV: "SV",
+  GTM: "GT", CUB: "CU", HND: "HN", BLZ: "BZ", PAN: "PA", CUW: "CW", ABW: "AW",
+  BHS: "BS", TCA: "TC", TTO: "TT", GRD: "GD", VCT: "VC", BRB: "BB", LCA: "LC",
+  DMA: "DM", MSR: "MS", ATG: "AG", KNA: "KN", VIR: "VI", BLM: "BL", PRI: "PR",
+  AIA: "AI", VGB: "VG", JAM: "JM", CYM: "KY", GLP: "GP", MTQ: "MQ", BES: "BQ",
+};
+const defaultCountryOf = (sid) =>
+  sid.startsWith("CA-") ? "CA" : sid.startsWith("MX-") ? "MX" : (FOREIGN_ALPHA3_TO_ALPHA2[sid] ?? null);
+
+const stateInfo = new Map(); // stateId -> { name, origName, color, custom, foreign, country }
 {
   // Welsh–Powell: color highest-degree states first so the tricky ones (MO,
   // TN with 8 neighbors) get first pick. Rotating the palette per state keeps
@@ -176,13 +213,21 @@ const stateInfo = new Map(); // stateId -> { name, origName, color, custom, fore
         if (c && c !== FOREIGN_FILL) takenCount.set(c, (takenCount.get(c) ?? 0) + 1);
       }
       const start = i % BASE_COLORS.length;
-      const rotated = BASE_COLORS.slice(start).concat(BASE_COLORS.slice(0, start));
+      const rotated = BASE_COLORS.slice(start)
+        .concat(BASE_COLORS.slice(0, start))
+        .map((c) => c.light);
       const color =
         rotated.find((c) => !takenCount.has(c)) ??
         rotated.reduce((best, c) => (takenCount.get(c) < takenCount.get(best) ? c : best));
       // origName pins the official name, so a rename can be told apart from
       // an untouched state even though both keep the real fips id.
-      stateInfo.set(fips, { name: data.states[fips], origName: data.states[fips], color, custom: false });
+      stateInfo.set(fips, {
+        name: data.states[fips],
+        origName: data.states[fips],
+        color,
+        custom: false,
+        country: "US",
+      });
     });
   for (const id of FOREIGN)
     stateInfo.set(id, {
@@ -191,12 +236,15 @@ const stateInfo = new Map(); // stateId -> { name, origName, color, custom, fore
       color: FOREIGN_FILL,
       custom: false,
       foreign: true,
+      country: defaultCountryOf(id),
     });
 }
 
 // The as-loaded coloring, so Reset can undo hand-picked colors along with
 // everything else.
 const origColors = new Map([...stateInfo].map(([sid, info]) => [sid, info.color]));
+// The as-loaded country, so Reset can undo a flag change the same way.
+const origCountries = new Map([...stateInfo].map(([sid, info]) => [sid, info.country]));
 
 let customCount = 0;
 let selected = null; // stateId or null
@@ -225,9 +273,14 @@ function modifiedStates() {
       mod.add(orig);
     }
   }
-  // A foreign unit admitted to the union is a change of its own, even
-  // before any county moves.
-  for (const sid of FOREIGN) if (!stateInfo.get(sid).foreign) mod.add(sid);
+  // A unit whose union membership no longer matches how it loaded is a
+  // change of its own, even before any county moves — a foreign unit
+  // admitted to the union, or (now that the flag menu can go either way) a
+  // real state that's left it. Custom states have no original membership to
+  // compare against — the territory loop above already caught them.
+  for (const [sid, info] of stateInfo) {
+    if (!info.custom && !!info.foreign !== FOREIGN.has(sid)) mod.add(sid);
+  }
   return mod;
 }
 
@@ -238,7 +291,9 @@ function modifiedStates() {
 let colorRotation = 0;
 function rotatedBaseColors() {
   const start = colorRotation++ % BASE_COLORS.length;
-  return BASE_COLORS.slice(start).concat(BASE_COLORS.slice(0, start));
+  return BASE_COLORS.slice(start)
+    .concat(BASE_COLORS.slice(0, start))
+    .map((c) => c.light);
 }
 
 // Pick a base fill no neighbor is wearing, falling back to the backup tier
@@ -255,13 +310,13 @@ function pickStateColor(neighborSids) {
   const rotated = rotatedBaseColors();
   return (
     rotated.find((c) => !taken.has(c)) ??
-    BACKUP_COLORS.find((c) => !taken.has(c)) ??
+    BACKUP_COLORS.find((c) => !taken.has(c.light))?.light ??
     rotated.reduce((best, c) => (taken.get(c) < taken.get(best) ? c : best))
   );
 }
 
 function leastUsedBaseColor() {
-  const count = new Map(BASE_COLORS.map((c) => [c, 0]));
+  const count = new Map(BASE_COLORS.map((c) => [c.light, 0]));
   for (const info of stateInfo.values()) {
     if (count.has(info.color)) count.set(info.color, count.get(info.color) + 1);
   }
@@ -284,7 +339,7 @@ function createState(name) {
   const id = "c" + ++customCount;
   // Provisional color; the real pick happens once the state has territory
   // and its neighbors are known (recolorState).
-  stateInfo.set(id, { name, color: leastUsedBaseColor(), custom: true });
+  stateInfo.set(id, { name, color: leastUsedBaseColor(), custom: true, country: "US" });
   return id;
 }
 
@@ -304,36 +359,32 @@ function recolorState(sid) {
   }
 }
 
-// House apportionment: Huntington–Hill, 435 seats, DC excluded. Each state's
-// House seats and electoral votes (seats plus two senators; a fixed 3 for DC)
-// are stamped onto its stats, so electoral votes rank and map like any other
-// stat. Foreign units are excluded too — until their territory is painted
-// into a (custom or real) state, at which point that state's seats simply
-// count the new population.
-function apportion(stats) {
-  const eligible = [...stats.entries()].filter(
-    ([sid, s]) => sid !== DC_SID && !stateInfo.get(sid)?.foreign && s.n > 0 && s.pop > 0
-  );
-  const seats = new Map(eligible.map(([sid]) => [sid, 1]));
-  let remaining = 435 - eligible.length;
-  while (remaining-- > 0 && eligible.length) {
-    let best = null;
-    let bp = -1;
-    for (const [sid, s] of eligible) {
-      const n = seats.get(sid);
-      const p = s.pop / Math.sqrt(n * (n + 1));
-      if (p > bp) {
-        bp = p;
-        best = sid;
-      }
-    }
-    seats.set(best, seats.get(best) + 1);
+// Sets which country a state belongs to — an ISO code, "US", or null for
+// independent — from the flag menu. This is the general form of what used
+// to be the single-purpose "Add as US state" button: `foreign` (which
+// everything else in the app reads) stays exactly the derived value it
+// always was, true for anything but "US", and a state that leaves the union
+// falls back to the shared foreign tan just like one that never joined it,
+// the same way a state that joins picks a real color from its neighbors.
+function setCountry(sid, code) {
+  const info = stateInfo.get(sid);
+  info.country = code;
+  info.foreign = code !== "US";
+  if (code === "US") {
+    const fipsList = [...assign].filter(([, s]) => s === sid).map(([f]) => f);
+    info.color = pickStateColor(borderingStates(fipsList).filter((n) => n !== sid));
+  } else {
+    info.color = FOREIGN_FILL;
   }
-  for (const [sid, s] of stats) {
-    s.seats = seats.get(sid) ?? 0;
-    s.ev = sid === DC_SID ? 3 : s.seats ? s.seats + 2 : 0;
-  }
+  labelsVersion++;
+  scheduleRefresh();
 }
+
+// Whether a unit sits outside the union right now. The scoring layer keeps
+// no state of its own, so this is what gets handed to apportion and ranksFor
+// for every reading of the live map; the original-map baseline passes the
+// as-loaded FOREIGN set instead.
+const isForeignState = (sid) => Boolean(stateInfo.get(sid)?.foreign);
 
 function computeStats(assignMap = assign) {
   const m = new Map();
@@ -384,7 +435,7 @@ function computeStats(assignMap = assign) {
     // Same approximation for life expectancy, which isn't additive either.
     s.life = s.lifePop ? s.lifeSum / s.lifePop : 0;
   }
-  apportion(m);
+  apportion(m, isForeignState);
   return m;
 }
 
@@ -400,81 +451,6 @@ const getStats = () => (statsCache ??= computeStats());
 let origRanksCache = null;
 const getOrigRanks = () =>
   (origRanksCache ??= ranksFor(computeStats(origAssign), (sid) => FOREIGN.has(sid)));
-
-// A replay of the 2024 presidential vote, winner-take-all per state.
-// Electoral votes come from the apportionment already stamped on the stats.
-function computeElections(stats) {
-  const tally = { ev: { d: 0, r: 0, x: 0 } };
-  for (const s of stats.values()) {
-    if (s.n === 0 || s.pop === 0) continue;
-    const side = s.dem > s.gop ? "d" : s.gop > s.dem ? "r" : "x";
-    tally.ev[side] += s.ev;
-  }
-  return tally;
-}
-
-const fmtPop = (n) =>
-  n >= 1e6 ? (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M"
-  : n >= 1e3 ? Math.round(n / 1e3) + "K"
-  : String(n);
-const fmtBigMoney = (thousands) => {
-  const d = thousands * 1000;
-  return d >= 1e12 ? "$" + (d / 1e12).toFixed(2) + "T"
-    : d >= 1e9 ? "$" + (d / 1e9).toFixed(1) + "B"
-    : "$" + Math.round(d / 1e6) + "M";
-};
-const fmtMoney = (d) => "$" + Math.round(d).toLocaleString("en-US");
-const fmtMoneyK = (d) => "$" + Math.round(d / 1e3) + "k";
-const fmtPct = (p) => p.toFixed(1) + "%";
-const fmtYears = (y) => y.toFixed(1) + " yrs";
-const fmtMargin = (m) =>
-  Math.abs(m) < 0.05 ? "Even" : (m > 0 ? "D+" : "R+") + Math.abs(m).toFixed(1);
-const fmtArea = (sqmi) =>
-  (sqmi >= 1e6 ? (sqmi / 1e6).toFixed(1).replace(/\.0$/, "") + "M"
-  : sqmi >= 1e3 ? Math.round(sqmi / 1e3) + "K"
-  : Math.round(sqmi)) + " mi²";
-
-// `has` marks states missing a stat's inputs so they show "—" instead of a
-// fake zero and stay out of that ranking. `bar` picks the mini-bar style in
-// the rankings list: scaled to the max, or diverging around zero.
-const STAT_DEFS = {
-  pop: { get: (s) => s.pop, fmt: fmtPop, bar: "abs" },
-  landArea: { get: (s) => s.landArea, fmt: fmtArea, bar: "abs" },
-  gdp: { get: (s) => s.gdp, fmt: fmtBigMoney, has: (s) => s.gdp > 0, bar: "abs" },
-  gdppc: { get: (s) => s.gdppc, fmt: fmtMoneyK, has: (s) => s.gdp > 0, bar: "abs" },
-  mhi: { get: (s) => s.mhi, fmt: fmtMoney, has: (s) => s.incPop > 0, bar: "abs" },
-  bach: { get: (s) => s.bach, fmt: fmtPct, bar: "abs" },
-  life: { get: (s) => s.life, fmt: fmtYears, has: (s) => s.lifePop > 0, bar: "abs" },
-  margin: { get: (s) => s.margin, fmt: fmtMargin, has: (s) => s.tot > 0, bar: "diverge" },
-  ev: { get: (s) => s.ev, fmt: String, has: (s) => s.ev > 0, bar: "abs" },
-  wht: { get: (s) => (s.rT ? (100 * s.rW) / s.rT : 0), fmt: fmtPct, has: (s) => s.rT > 0, bar: "abs" },
-  blk: { get: (s) => (s.rT ? (100 * s.rB) / s.rT : 0), fmt: fmtPct, has: (s) => s.rT > 0, bar: "abs" },
-  hsp: { get: (s) => (s.rT ? (100 * s.rH) / s.rT : 0), fmt: fmtPct, has: (s) => s.rT > 0, bar: "abs" },
-  asn: { get: (s) => (s.rT ? (100 * s.rA) / s.rT : 0), fmt: fmtPct, has: (s) => s.rT > 0, bar: "abs" },
-  nat: { get: (s) => (s.rT ? (100 * s.rN) / s.rT : 0), fmt: fmtPct, has: (s) => s.rT > 0, bar: "abs" },
-};
-
-// Data view: totals (population, GDP, electoral votes) become scaled symbols,
-// because a total isn't a property of every point of a state; rates and
-// margins apply everywhere, so they color whole states as choropleths.
-const SYMBOL_STATS = {
-  pop: { mark: "circle", noun: "population", fill: [217, 123, 38, 115], edge: [156, 85, 20, 255] },
-  gdp: { mark: "square", noun: "GDP", fill: [47, 143, 91, 115], edge: [30, 107, 64, 255] },
-  ev: { mark: "dots", noun: "electoral votes", unit: "electoral vote", fill: [125, 102, 186, 115], edge: [86, 66, 138, 255] },
-};
-
-// Hues are re-stepped from the old muted set for the waffle's small dots:
-// an 8px dot carries far less color than a bar segment, and the old steps
-// failed colorblind-separation checks (White/Black blues nearly identical,
-// Asian/Native a classic red-green pair). Same hue per group, more chroma,
-// bigger lightness splits between neighbors.
-const RACE_GROUPS = [
-  { key: "rW", label: "White", color: "#5b8fd0" },
-  { key: "rB", label: "Black", color: "#7b4fa6" },
-  { key: "rH", label: "Hispanic", color: "#c98a20" },
-  { key: "rA", label: "Asian", color: "#35a189" },
-  { key: "rN", label: "Native", color: "#ad4f3f" },
-];
 
 // ------------------------------------------------------------- projection
 
@@ -1484,104 +1460,6 @@ rebuildDerived();
 
 // --------------------------------------------------------------------- map
 
-const rgba = (css, alpha = 255) => {
-  const c = d3.rgb(css);
-  return [Math.round(c.r), Math.round(c.g), Math.round(c.b), alpha];
-};
-
-// One water blue and one shoreline blue for every lake, carved or drawn on
-// top, so the two render paths are indistinguishable on the map.
-const LAKE = rgba("#d5e8f4");
-const HALO = rgba("#cde4f2");
-const WHITE = rgba("#ffffff");
-const COUNTY_LINE = rgba("#ffffff", 128);
-const STATE_LINE = rgba("#999999");
-// Fully transparent: what the merged line layer paints for a segment that
-// currently draws nothing (a county hairline while the data view is up).
-const TRANSPARENT = [0, 0, 0, 0];
-const COAST = rgba("#8ab8d6");
-const LAND = rgba("#5b6472");
-const HOVER = [0, 0, 0, 18]; // the old fill-opacity: 0.07
-const GREY_LAND = rgba("#e4e4e4"); // data view: the ground itself carries no color
-const NO_DATA = rgba("#cccccc");
-// Non-union units in data view: the atlas tan's hue, washed well toward the
-// page white. The full tan sits at the same lightness as GREY_LAND, so the
-// union wouldn't separate from its context; the pale wash lets the context
-// recede while the warm hue still says "on the map, not in the union" — and
-// keeps it apart from NO_DATA's grey, which means a state missing data.
-const FOREIGN_LAND = rgba("#f4f0e9");
-// Globe mode only: the sea the sphere shows where no unit covers it, and the
-// graticule over it. Both stay paler than the coast blue so the continent
-// keeps reading as the subject and the sphere as its ground.
-const OCEAN = rgba("#e8f1f7");
-const GRATICULE_LINE = rgba("#b9cfdf", 150);
-// The scenery land beyond the map's units wears exactly what a non-union unit
-// wears: the same tan, the same white hairline between neighbours, the same
-// blue shoreline and halo, the same water blue in its lakes. There is no
-// second style for "not the map" — what marks the map out is that its ground
-// carries state colors, hover, labels and paint, and none of that reaches
-// here. A tan of its own only put a seam across the Panama border.
-const WORLD_LAND = rgba(FOREIGN_FILL);
-
-// The band inside a state's border is the state's own fill pushed deeper: the
-// same hue, more saturated (capped at 1) and darker by the usual multiplier.
-// That alone is enough for most hues — it's what gives red, purple and blue
-// their rich-looking band. But HSL's lightness doesn't track perceived
-// brightness consistently across hues: yellow and green read as bright even
-// at a fairly low HSL l, so the same multiplier barely darkens them. Rather
-// than replace the multiplier (which would flatten the hues it already suits),
-// only step in when the result doesn't clear a minimum perceptual (CIELAB)
-// lightness drop, and bisect HSL's own l — never LCH chroma directly — down
-// until it does, since any l in HSL is guaranteed to stay in the sRGB gamut.
-const MIN_LAB_DROP = 8;
-const deepen = (css) => {
-  const c = d3.hsl(css);
-  const s = Math.min(1, c.s * 1.35);
-  let l = c.l * 0.82;
-  const fillLabL = d3.lab(css).l;
-  if (fillLabL - d3.lab(d3.hsl(c.h, s, l)).l < MIN_LAB_DROP) {
-    const target = fillLabL - MIN_LAB_DROP;
-    let lo = 0,
-      hi = l;
-    for (let i = 0; i < 20; i++) {
-      const mid = (lo + hi) / 2;
-      if (d3.lab(d3.hsl(c.h, s, mid)).l > target) hi = mid;
-      else lo = mid;
-    }
-    l = lo;
-  }
-  return d3.hsl(c.h, s, l);
-};
-// Unselected states grey out while painting: the fill keeps its lightness but
-// loses nearly all its saturation. Because the ground stays as dark as ever,
-// the white county and state hairlines read exactly as they do outside paint
-// mode, while the selected state's full color pops against the grey.
-const dimmed = (color) => {
-  const c = d3.hsl(color);
-  c.s *= 0.12;
-  return c;
-};
-// The selected state's fill takes a small step toward its band color — a bit
-// more saturated, a shade darker — so the whole state reads as active, not
-// just the ground near its outline.
-const highlight = (color) => {
-  const c = d3.hsl(color);
-  c.s = Math.min(1, c.s * 1.25);
-  c.l *= 0.955;
-  return c;
-};
-
-const BAND_WIDTH = 10; // pixels across the border, so five to a side
-const FLAT = { coordinateSystem: COORDINATE_SYSTEM.CARTESIAN };
-const EMPTY = [];
-
-// Shared extension instances: deck.gl compares these by reference, so building
-// them once keeps a layer rebuild from looking like a change.
-const borderFilter = new DataFilterExtension({ filterSize: 1 });
-const BORDER_EXT = [borderFilter];
-const BAND_EXT = [new MaskExtension()];
-const SHOWN = [0.5, 1.5];
-
 const mapWrap = document.getElementById("map-wrap");
 const insetCanvas = document.getElementById("inset-canvas");
 const svg = d3.select("#map");
@@ -1688,22 +1566,35 @@ function viewState() {
 
 // The camera for the inset deck. The boxes render at a fixed on-screen size
 // — insetScale() CSS pixels per design unit: 1 on desktop, and on a map too
-// narrow for the full-size cluster (Alaska and Hawaii side by side, plus the
+// narrow for the full-size cluster (the open boxes side by side, plus the
 // anchor margin at both ends) the whole cluster scales down to fit the
 // width. The target is solved from screen = (world - target) * s + size/2 so
-// the cluster's bottom-left design corner (the Alaska box's left edge, and
-// the shared INSET_BOTTOM_Y) pins to a fixed spot just above the Reset view
-// / Alaska / Hawaii buttons. Pan and zoom never touch this view.
-const INSET_ANCHOR = { left: 8, bottom: 38 };
+// the cluster's bottom-left design corner (the leftmost open box's left
+// edge, and the shared INSET_BOTTOM_Y) pins to a fixed spot just above the
+// expander tabs. Pan and zoom never touch this view.
+//
+// Anchoring on the OPEN boxes rather than a fixed corner is what left-
+// justifies Hawaii when Alaska is closed: its baked design coordinates
+// never move, the camera slides over instead, and every consumer — the
+// deck, the SVG frames and labels, the mask holes, the canvas clip, the
+// pick inverse — reads this same camera, so they all move together.
+const INSET_ANCHOR = { left: 8, bottom: 30 };
+function insetCluster() {
+  const boxes = ["ak", "hi"].filter((k) => !insetHidden[k]).map((k) => INSETS[k]);
+  // Both closed: nothing draws, but the math still runs — the full cluster
+  // stands in so the numbers stay finite.
+  if (!boxes.length) boxes.push(INSETS.ak, INSETS.hi);
+  const x = Math.min(...boxes.map((b) => b.x));
+  return { x, w: Math.max(...boxes.map((b) => b.x + b.w)) - x };
+}
 function insetScale() {
-  const clusterW = INSETS.hi.x + INSETS.hi.w - INSETS.ak.x;
-  return Math.max(0.3, Math.min(1, (viewWidth - 2 * INSET_ANCHOR.left) / clusterW));
+  return Math.max(0.3, Math.min(1, (viewWidth - 2 * INSET_ANCHOR.left) / insetCluster().w));
 }
 function insetViewState() {
   const s = insetScale();
   return {
     target: [
-      INSETS.ak.x + (viewWidth / 2 - INSET_ANCHOR.left) / s,
+      insetCluster().x + (viewWidth / 2 - INSET_ANCHOR.left) / s,
       INSET_BOTTOM_Y - (viewHeight / 2 - INSET_ANCHOR.bottom) / s,
       0,
     ],
@@ -1722,21 +1613,6 @@ let insetDeck;
 const seqColor = (t) => rgba(d3.interpolateYlGnBu(0.08 + 0.84 * t));
 const divColor = (t) => rgba(d3.interpolateRdBu(0.08 + 0.84 * t));
 const clamp01 = (t) => Math.max(0, Math.min(1, t));
-
-// Drops Tukey outliers (often DC, on a per-capita stat) before a choropleth's
-// min/max or ends get sized, so one extreme state can't stretch the ramp and
-// flatten it for everyone else. The outlier itself is still painted — its
-// color just clamps to the ramp's deepest end instead of sitting mid-scale.
-function trimOutliers(vals) {
-  if (vals.length < 4) return vals;
-  const sorted = [...vals].sort((a, b) => a - b);
-  const q1 = d3.quantileSorted(sorted, 0.25);
-  const q3 = d3.quantileSorted(sorted, 0.75);
-  const iqr = q3 - q1;
-  if (iqr <= 0) return vals;
-  const trimmed = sorted.filter((v) => v >= q1 - 1.5 * iqr && v <= q3 + 1.5 * iqr);
-  return trimmed.length >= 2 ? trimmed : vals;
-}
 
 // The data view covers the union only. Units still outside it stay out of
 // every reading — fills, marks, labels, the legend's ends — so a populous
@@ -2056,6 +1932,14 @@ function renderDataLabels() {
     .text((d) => d.text);
 }
 
+// ------------------------------------------------- hover and selection shapes
+
+// Which drawn parts the hover tint and the selection outline cover right now.
+// All four are memoized on a key of what they read, because a refresh asks
+// each of them once per frame and the answer only changes when the pointer
+// moves to another unit, the selection changes, or the model under either
+// does. They are geometry lookups, not data-view code: atlas view uses them
+// exactly as much as the choropleth above does.
 // Hover highlight target: the county under the pointer in atlas view, its
 // whole state in data view (where county lines don't exist). Returns every
 // copy — globe and inset — so hovering a county lights it in both places;
@@ -2174,6 +2058,13 @@ const insetHoverLayer = (data) =>
     ...FLAT,
   });
 
+// ------------------------------------------------------------ drawing the map
+
+// From here down is the renderer: what color everything wears, the deck.gl
+// layer list, and the view that layer list is drawn into. It reads the data
+// view above (fills, marks, labels) as one input among many — atlas view goes
+// through exactly the same path with the choropleth turned off.
+
 // What colour a state's ground and its border band wear right now. Pulled out
 // of buildLayers so the globe renderer reads exactly the same definitions: the
 // deck path calls these per projected part, the globe writes each answer into
@@ -2202,14 +2093,14 @@ function groundColors() {
     const key = dim ? sid + "!" : hot ? sid + "*" : sid;
     let color = bands.get(key);
     if (!color) {
-      // The selected state's band deepens from its boosted fill, so the
-      // fill-to-band contrast stays the same while both step up together.
+      // The selected state's band takes the same highlight step its fill
+      // takes, so the fill-to-band contrast stays put while both step up.
       // Units outside the union wear no band at all: their "band" is the
       // fill itself, so the map edge and the seam stay flat on the foreign
       // side — no dark rim around Canada or Mexico.
       const info = stateInfo.get(sid);
-      const boosted = hot ? highlight(info.color) : info.color;
-      const deep = info.foreign ? boosted : deepen(boosted);
+      const deepBase = info.foreign ? info.color : deepOf(info.color);
+      const deep = hot ? highlight(deepBase) : deepBase;
       bands.set(key, (color = rgba(dim ? dimmed(deep) : deep)));
     }
     return color;
@@ -2239,6 +2130,23 @@ function paintGlobe() {
   // A small dense index per state, so the shader can compare two units'
   // owners with one integer test. Rebuilt per repaint; there are ~60 states.
   const stateOrder = new Map([...stateInfo.keys()].map((sid, i) => [sid, i]));
+  // The same trick for the country a state flies the flag of, so the shader
+  // can tell an international border from a line between two provinces of the
+  // one country. A state with no flag ("Independent") is a country of its own
+  // and keys on its own id, which is what makes a seceded state's edge read as
+  // a border rather than merging into whatever it left.
+  //
+  // One byte in the attribute table, so the index wraps past 255. Reaching
+  // that needs 256 states each flying a different flag, and every one of them
+  // beyond the 256th only risks matching a neighbour and losing its line —
+  // there is no correctness to lose elsewhere, so it is not worth a wider
+  // field.
+  const countryOrder = new Map();
+  const countryOf = (sid) => {
+    const key = stateInfo.get(sid)?.country ?? `~${sid}`;
+    if (!countryOrder.has(key)) countryOrder.set(key, countryOrder.size & 0xff);
+    return countryOrder.get(key);
+  };
   globeMap.paint({
     assign,
     stateOrder,
@@ -2247,6 +2155,7 @@ function paintGlobe() {
     // in the data view — where there are no bands — nothing reads this.
     bandOf: dataView ? groundOf : bandOf,
     isForeign: (sid) => !!stateInfo.get(sid)?.foreign,
+    countryOf,
     selected,
   });
   globeMap.setView({
@@ -2255,7 +2164,7 @@ function paintGlobe() {
     // The atlas outline is the selected state's own colour pushed darker; in
     // data view that colour means nothing, so a neutral dark line marks it.
     selectionColor: selected
-      ? glColor(dataView ? rgba("#333333") : rgba(d3.color(stateInfo.get(selected).color).darker(1.4)))
+      ? glColor(dataView ? OUTLINE_FALLBACK : rgba(d3.color(stateInfo.get(selected).color).darker(1.4)))
       : undefined,
   });
   globeMap.requestDraw();
@@ -2263,684 +2172,27 @@ function paintGlobe() {
 
 // Builds both decks' layer lists in one pass, so the inset stack shares the
 // accessors (fills, bands, filters) with the globe stack.
-function buildLayers() {
-  const trigger = mapVersion;
-  const dataView = inDataView();
-  const statKey = rankStatSel.value;
-  const symbol = dataView ? SYMBOL_STATS[statKey] : undefined;
-  const symbols = symbol ? symbolData(statKey) : EMPTY;
-  // Each open inset gets its own marks, sized and placed from its own county
-  // duplicates (insetCountyGeo) rather than the globe copies above — the
-  // same reasoning as the inset data labels.
-  const insetSymbols = symbol
-    ? ["ak", "hi"].flatMap((region) =>
-        insetHidden[region] ? [] : computeSymbolData(statKey, stateCentroids(insetCountyGeo[region]))
-      )
-    : EMPTY;
-  // Keyed by state, not by part: the deck layers below look one up per record,
-  // and the globe writes each one into the palette once per unit. Same
-  // definitions either way — see groundColors.
-  const { fillOf: fillForState, bandOf: bandForState, groundOf } = groundColors();
-  const fillOf = (part) => fillForState(assign.get(part.fips));
-  const bandOf = (part) => bandForState(assign.get(part.fips));
-  const countyFill = (part) => groundOf(assign.get(part.fips));
-
-  const isBorder = (d) => assign.get(d.a) !== assign.get(d.b);
-  // County hairlines and state borders share one layer per deck: same arc
-  // data, same width, only the color differs per segment — so the continent's
-  // arcs make one pass instead of two. A state border draws grey; every other
-  // arc draws the white hairline in atlas view and nothing in data view,
-  // where county lines don't exist. Painting restyles segments through the
-  // same per-segment attribute update the old filter used.
-  const lineColor = (d) =>
-    isBorder(d) && !foreignBorder(d) ? STATE_LINE : dataView ? TRANSPARENT : COUNTY_LINE;
-  // Borders between two units that are both still outside the union get no
-  // state-border treatment (no band, no grey line): unpainted territory all
-  // wears one tan and reads as context, not as states. The white county
-  // hairline still separates the units, and the US–foreign seam keeps the
-  // full treatment — it is the union's outer edge.
-  const isForeignSid = (sid) => stateInfo.get(sid)?.foreign;
-  const foreignBorder = (d) =>
-    isForeignSid(assign.get(d.a)) && isForeignSid(assign.get(d.b));
-  // Which segments carry the border band. Interior segments — shared arcs
-  // and the appended seam segments — wear it while their two sides belong
-  // to different members of the union. Edge runs (the map's outer boundary)
-  // wear it while the unit that owns them is in the union, so a foreign
-  // unit's coastline stays bare until its territory is painted in.
-  const bandFilter = (d) =>
-    (d.edge ? !isForeignSid(assign.get(d.a)) : isBorder(d) && !foreignBorder(d)) ? 1 : 0;
-  // The selected state's edge segments, already subset and cached (see
-  // selectedEdges above).
-  const selEdge = selectedEdges();
-  // The atlas outline is the selected state's own color pushed darker; in data
-  // view that color means nothing, so a neutral dark line marks the selection.
-  const outline = !selected
-    ? WHITE
-    : dataView
-      ? rgba("#333333")
-      : rgba(d3.color(stateInfo.get(selected).color).darker(1.4));
-
-  const { main: hoverMain, inset: hoverInset } = hoverSplit();
-
-  // Hover highlight: 7% black over the county (or, in data view, the state)
-  // under the pointer, the same 0.93 multiply the overlay path used to give.
-  // It gets a deck to itself because deck.gl redraws a whole deck whenever any
-  // layer's data changes: left in the map stack, one mouse move repainted all
-  // ~20 map layers and threw away the picking buffer that the next pick then
-  // had to rebuild. The cost of the move is compositing order â this canvas
-  // is above the map's lines, lakes, data symbols and selection outline, so
-  // the tint now falls on those too instead of sitting under them. The inset
-  // hover stays down in the inset stack (below), where it has to be: this
-  // canvas is under the inset canvas, so a tint drawn here would vanish
-  // beneath the boxes' white backing.
-  const hoverLayers = [countyHoverLayer(hoverMain)];
-
-  const mapLayers = [
-    // Globe furniture, under everything: the ocean disc is the sphere itself,
-    // and the graticule rides on it.
-    new SolidPolygonLayer({
-      id: "globe-sphere",
-      data: [SPHERE_DISC],
-      getPolygon: (d) => d.rings,
-      getFillColor: OCEAN,
-      ...FLAT,
-    }),
-    new PathLayer({
-      id: "globe-graticule",
-      data: MAIN.graticulePaths,
-      getPath: (d) => d.path,
-      getColor: GRATICULE_LINE,
-      getWidth: 0.7,
-      widthUnits: "common",
-      ...FLAT,
-    }),
-    // The rest of the world, under everything the map proper draws. It is
-    // scenery in both views: the sphere is bare without it. The map's own
-    // units cover none of it — the build leaves out every country the map
-    // draws — so nothing overlaps and no seam shows.
-    //
-    // The six layers are the map's own stack in miniature, in the same order
-    // and the same colors: halo under the land, then the fill, the lines
-    // between countries, the lakes over them, and the shoreline last. What it
-    // leaves out is everything that belongs to a paintable unit — no border
-    // band, no selection, no hover, no state line.
-    new PathLayer({
-      id: "world-coast-halo",
-      data: MAIN.worldCoastPaths,
-      visible: !dataView,
-      getPath: (d) => d.path,
-      getColor: HALO,
-      getWidth: 16,
-      widthUnits: "pixels",
-      jointRounded: true,
-      capRounded: true,
-      ...FLAT,
-    }),
-    new SolidPolygonLayer({
-      id: "world-land",
-      data: MAIN.worldParts,
-      getPolygon: (d) => d.rings,
-      getFillColor: dataView ? FOREIGN_LAND : WORLD_LAND,
-      ...FLAT,
-    }),
-    // Country lines, like the county hairlines they match: gone in data view,
-    // where the ground is read by color and a line inside it would only break
-    // the wash up.
-    new PathLayer({
-      id: "world-borders",
-      data: MAIN.worldBorderPaths,
-      visible: !dataView,
-      getPath: (d) => d.path,
-      getColor: COUNTY_LINE,
-      getWidth: 1,
-      widthUnits: "pixels",
-      capRounded: true,
-      ...FLAT,
-    }),
-    // Natural Earth carves the largest lakes out of the countries it draws and
-    // leaves the rest sitting inside them, so these are drawn over the land
-    // either way: over a hole they fill it, over a country they cover it. Both
-    // read the same, which is what the map's own two lake layers achieve
-    // between them.
-    new SolidPolygonLayer({
-      id: "world-lakes",
-      data: MAIN.worldLakeParts,
-      getPolygon: (d) => d.rings,
-      getFillColor: dataView ? WHITE : LAKE,
-      ...FLAT,
-    }),
-    new PathLayer({
-      id: "world-lake-edges",
-      data: MAIN.worldLakeEdges,
-      getPath: (d) => d.path,
-      getColor: COAST,
-      getWidth: 1.1,
-      widthUnits: "pixels",
-      jointRounded: true,
-      capRounded: true,
-      ...FLAT,
-    }),
-    new PathLayer({
-      id: "world-coast-line",
-      data: MAIN.worldCoastPaths,
-      getPath: (d) => d.path,
-      getColor: COAST,
-      getWidth: 1.1,
-      widthUnits: "pixels",
-      jointRounded: true,
-      capRounded: true,
-      ...FLAT,
-    }),
-    // Water first: lakes the Census file carves out of the land, then a soft
-    // halo along the ocean shoreline (only — a halo over a Great Lake would
-    // ring it in an off shade). The lakes get a slight same-color stroke to
-    // close generalization slivers against the Census shoreline; the overshoot
-    // hides under the white nation shape drawn on top of them. Data view
-    // drops the blue water fill and the halo: carved lakes show the page
-    // white through their holes (their shoreline stays, via coast-line
-    // below), and the on-top lakes further down match by going white.
-    new SolidPolygonLayer({
-      id: "lakes-under",
-      data: MAIN.lakesUnder,
-      visible: !dataView,
-      getPolygon: (d) => d.rings,
-      getFillColor: LAKE,
-      ...FLAT,
-    }),
-    new PathLayer({
-      id: "lakes-under-edge",
-      data: MAIN.lakeEdgesUnder,
-      visible: !dataView,
-      getPath: (d) => d.path,
-      getColor: LAKE,
-      getWidth: 2,
-      widthUnits: "common",
-      ...FLAT,
-    }),
-    // Not drawn: this stroke only feeds the band's mask, below. It is a plain
-    // line straddling every state border and the nation's edge, so it covers
-    // exactly the ground within half its width of a border — including, where
-    // a river border doubles back on itself, the whole of a meander too tight
-    // to hold a band.
-    new PathLayer({
-      id: "band-mask",
-      data: MAIN.bandMaskPaths,
-      visible: !dataView,
-      operation: "mask",
-      getPath: (d) => d.path,
-      getWidth: BAND_WIDTH,
-      widthUnits: "pixels",
-      jointRounded: true,
-      capRounded: true,
-      getFilterValue: bandFilter,
-      filterRange: SHOWN,
-      updateTriggers: { getFilterValue: trigger },
-      extensions: BORDER_EXT,
-      ...FLAT,
-    }),
-    new PathLayer({
-      id: "coast-halo",
-      data: MAIN.coastPaths,
-      visible: !dataView,
-      getPath: (d) => d.path,
-      getColor: HALO,
-      getWidth: 16,
-      widthUnits: "pixels",
-      jointRounded: true,
-      capRounded: true,
-      ...FLAT,
-    }),
-    new SolidPolygonLayer({
-      id: "nation-backing",
-      data: MAIN.nationParts,
-      getPolygon: (d) => d.rings,
-      getFillColor: WHITE,
-      ...FLAT,
-    }),
-    // The seam aprons (see their construction above), clipped to the land so
-    // they can't paint tan into the sea.
-    new SolidPolygonLayer({
-      id: "land-mask",
-      data: MAIN.nationParts,
-      operation: "mask",
-      getPolygon: (d) => d.rings,
-      ...FLAT,
-    }),
-    new SolidPolygonLayer({
-      id: "seam-aprons",
-      data: MAIN.apronParts,
-      getPolygon: (d) => d.rings,
-      getFillColor: countyFill,
-      updateTriggers: { getFillColor: [trigger, statKey, dataView] },
-      extensions: BAND_EXT,
-      maskId: "land-mask",
-      maskByInstance: false,
-      ...FLAT,
-    }),
-    new SolidPolygonLayer({
-      id: "counties",
-      data: MAIN.countyParts,
-      getPolygon: (d) => d.rings,
-      getFillColor: countyFill,
-      updateTriggers: { getFillColor: [trigger, statKey, dataView] },
-      pickable: true,
-      ...FLAT,
-    }),
-    // Atlas-style borders: along the inside of every state border and the
-    // nation's edge runs a band of that state's own color, more saturated than
-    // its fill. It is the counties over again in the deeper color, showing only
-    // where the mask above lets them — so the band is the state's own ground by
-    // construction and can't spill across a border however the line bends. The
-    // bands go under the county hairlines and the white state border, which is
-    // what keeps those lines reading over the top of them.
-    new SolidPolygonLayer({
-      id: "band",
-      data: MAIN.countyParts,
-      visible: !dataView,
-      getPolygon: (d) => d.rings,
-      getFillColor: bandOf,
-      updateTriggers: { getFillColor: trigger },
-      extensions: BAND_EXT,
-      maskId: "band-mask",
-      maskByInstance: false,
-      ...FLAT,
-    }),
-    new PathLayer({
-      id: "map-lines",
-      data: MAIN.arcPaths,
-      getPath: (d) => d.path,
-      getColor: lineColor,
-      getWidth: 1,
-      widthUnits: "pixels",
-      capRounded: true,
-      updateTriggers: { getColor: [trigger, dataView] },
-      ...FLAT,
-    }),
-    // Rivers, over the ground and under every edge of the water they run into.
-    // Above the county fills and the border band, because a river is a fact
-    // about the ground and breaking it wherever a state line happens to fall
-    // would read as a rendering fault. Below the lakes and the coastline, so a
-    // mouth that overshoots its estuary is covered by the edge it overshot
-    // rather than striking out across open water. The coastline's blue, in a
-    // weight that tapers with the tier, and gone in data view, where the ground
-    // is read by color and a thread across it is only clutter.
-    //
-    // Two differences from the globe stack. The tiers are frozen at their home
-    // view state rather than following the zoom, for the reason given where
-    // RIVER_TIERS is defined. And the globe draws every lake in the world above
-    // this line, where here the scenery lakes are drawn far below, back with the
-    // rest of the world — so a river running into Lake Victoria is covered there
-    // and not here. That costs a few pixels of overshoot on lakes outside North
-    // America, and closing it would mean drawing the world's lakes twice.
-    ...RIVER_TIERS.map(
-      (t) =>
-        new PathLayer({
-          id: t.group,
-          data: MAIN.worldRiverPaths[t.group],
-          visible: !dataView,
-          getPath: (d) => d.path,
-          getColor: COAST,
-          getWidth: t.width,
-          widthUnits: "pixels",
-          jointRounded: true,
-          capRounded: true,
-          ...FLAT,
-        })
-    ),
-    // Lakes that sit inside unit polygons (not carved out of the land) are
-    // drawn over the fills instead, in the same water blue — and their edge
-    // matches the carved lakes' lakeshore treatment (the coast-line layer
-    // below), so the two render paths are indistinguishable. In data view
-    // the fill flips to page white: a carved lake shows the page through its
-    // hole there, and an on-top lake has to read the same — its water
-    // carries no data, so it blanks the stat color underneath.
-    new SolidPolygonLayer({
-      id: "lakes-over",
-      data: MAIN.lakesOver,
-      getPolygon: (d) => d.rings,
-      getFillColor: dataView ? WHITE : LAKE,
-      ...FLAT,
-    }),
-    new PathLayer({
-      id: "lakes-over-edge",
-      data: MAIN.lakeEdgesOver,
-      getPath: (d) => d.path,
-      getColor: COAST,
-      getWidth: 1.1,
-      widthUnits: "pixels",
-      jointRounded: true,
-      capRounded: true,
-      ...FLAT,
-    }),
-    // The map's outer edge: blue where the far side is water (ocean and
-    // Great Lakes alike), dark where it's land beyond the map's units.
-    new PathLayer({
-      id: "coast-line",
-      data: MAIN.shorePaths,
-      getPath: (d) => d.path,
-      getColor: COAST,
-      getWidth: 1.1,
-      widthUnits: "pixels",
-      jointRounded: true,
-      capRounded: true,
-      ...FLAT,
-    }),
-    new PathLayer({
-      id: "border-line",
-      data: MAIN.borderPaths,
-      getPath: (d) => d.path,
-      getColor: LAND,
-      getWidth: 1.1,
-      widthUnits: "pixels",
-      jointRounded: true,
-      capRounded: true,
-      ...FLAT,
-    }),
-    // Data view symbols, on top of everything but the selection outline.
-    new ScatterplotLayer({
-      id: "data-circles",
-      data: symbol?.mark === "circle" ? symbols : EMPTY,
-      getPosition: (d) => [d.x, d.y],
-      getRadius: (d) => d.hw,
-      radiusUnits: "common",
-      stroked: true,
-      getFillColor: symbol?.fill ?? WHITE,
-      getLineColor: symbol?.edge ?? WHITE,
-      getLineWidth: 1,
-      lineWidthUnits: "common",
-      ...FLAT,
-    }),
-    new PolygonLayer({
-      id: "data-squares",
-      data: symbol?.mark === "square" ? symbols : EMPTY,
-      getPolygon: (d) => {
-        const h = d.hw;
-        return [
-          [d.x - h, d.y - h],
-          [d.x + h, d.y - h],
-          [d.x + h, d.y + h],
-          [d.x - h, d.y + h],
-        ];
-      },
-      stroked: true,
-      getFillColor: symbol?.fill ?? WHITE,
-      getLineColor: symbol?.edge ?? WHITE,
-      getLineWidth: 1,
-      lineWidthUnits: "common",
-      ...FLAT,
-    }),
-    // The electoral-vote unit chart: every dot is one vote, so the stroke
-    // thins to keep the tiny circles from reading as rings.
-    new ScatterplotLayer({
-      id: "data-dots",
-      data: symbol?.mark === "dots" ? dotPositions(symbols) : EMPTY,
-      getPosition: (d) => [d.x, d.y],
-      getRadius: DOT_R,
-      radiusUnits: "common",
-      stroked: true,
-      getFillColor: symbol?.fill ?? WHITE,
-      getLineColor: symbol?.edge ?? WHITE,
-      getLineWidth: 0.5,
-      lineWidthUnits: "common",
-      ...FLAT,
-    }),
-    // The selection edge is a dark line over a wider white casing. The casing
-    // cuts a bright gap between the line and the border bands on either side,
-    // which is what makes the selection pop instead of sinking into them.
-    new PathLayer({
-      id: "selected-casing",
-      data: selEdge.main,
-      visible: !!selected,
-      getPath: (d) => d.path,
-      getColor: WHITE,
-      getWidth: 5.6,
-      widthUnits: "pixels",
-      jointRounded: true,
-      capRounded: true,
-      ...FLAT,
-    }),
-    new PathLayer({
-      id: "selected-outline",
-      data: selEdge.main,
-      visible: !!selected,
-      getPath: (d) => d.path,
-      getColor: outline,
-      getWidth: 2.6,
-      widthUnits: "pixels",
-      jointRounded: true,
-      capRounded: true,
-      ...FLAT,
-    }),
-  ];
-
-  // ---- Alaska/Hawaii insets: a duplicate mini-map on the inset deck's own
-  // canvas, above the map. A white backing hides whatever map lies under
-  // the box; the content mirrors the atlas stack (fills — the faded foreign
-  // neighbors included — lakes, seam aprons, band, hover, lines, coast,
-  // selection; the state names ride the overlay SVG, like the globe's). The
-  // V arrays hold only the open boxes' data, so a collapsed inset costs
-  // nothing.
-  const insetLayers = [
-    // The insets need a mask of their own: deck fits a mask to its first
-    // viewport, so the main deck's mask — refitted to wherever the map is
-    // zoomed — would crop the boxes right out. Width is in common units
-    // because the mask pass renders through a detached viewport where
-    // "pixels" means texels, not screen; at this deck's zoom 0, one common
-    // unit IS one CSS pixel, so the band width matches the main map's.
-    new PathLayer({
-      id: "inset-band-mask",
-      data: V.bandMaskPaths,
-      visible: !dataView,
-      operation: "mask",
-      getPath: (d) => d.path,
-      getWidth: BAND_WIDTH,
-      widthUnits: "common",
-      jointRounded: true,
-      capRounded: true,
-      getFilterValue: bandFilter,
-      filterRange: SHOWN,
-      updateTriggers: { getFilterValue: trigger },
-      extensions: BORDER_EXT,
-      ...FLAT,
-    }),
-    new SolidPolygonLayer({
-      id: "inset-backing",
-      data: V.backing,
-      getPolygon: (d) => d.rings,
-      getFillColor: WHITE,
-      ...FLAT,
-    }),
-    // Carved lakes, as on the main map: drawn under the county fills and
-    // showing through their holes (the Northwest Territories' corner of the
-    // Alaska box holds a slice of Great Bear Lake). In data view the fill
-    // drops out and the hole shows the backing's white, like the page white
-    // on the globe.
-    new SolidPolygonLayer({
-      id: "inset-lakes-under",
-      data: V.lakesUnder,
-      visible: !dataView,
-      getPolygon: (d) => d.rings,
-      getFillColor: LAKE,
-      ...FLAT,
-    }),
-    new PathLayer({
-      id: "inset-lakes-under-edge",
-      data: V.lakeEdgesUnder,
-      visible: !dataView,
-      getPath: (d) => d.path,
-      getColor: LAKE,
-      getWidth: 2,
-      widthUnits: "common",
-      ...FLAT,
-    }),
-    // The ocean halo, as on the main map. It rides above the white backing
-    // (which plays the sea inside the box) and under the county fills (which
-    // stand in for the nation shape and hide its landward half).
-    new PathLayer({
-      id: "inset-coast-halo",
-      data: V.coastPaths,
-      visible: !dataView,
-      getPath: (d) => d.path,
-      getColor: HALO,
-      getWidth: 16,
-      widthUnits: "pixels",
-      jointRounded: true,
-      capRounded: true,
-      ...FLAT,
-    }),
-    // The seam under-fill, as on the main map, so a cross-border merge can't
-    // open a white crack along the Canada seam inside the box. The main map
-    // clips its aprons to the land mask; at the boxes' fixed scale the
-    // aprons' overshoot past the seam's sea ends is a fraction of a pixel,
-    // so no mask is needed here.
-    new SolidPolygonLayer({
-      id: "inset-seam-aprons",
-      data: V.apronParts,
-      getPolygon: (d) => d.rings,
-      getFillColor: countyFill,
-      updateTriggers: { getFillColor: [trigger, statKey, dataView] },
-      ...FLAT,
-    }),
-    new SolidPolygonLayer({
-      id: "inset-counties",
-      data: V.countyParts,
-      getPolygon: (d) => d.rings,
-      getFillColor: countyFill,
-      updateTriggers: { getFillColor: [trigger, statKey, dataView] },
-      pickable: true,
-      ...FLAT,
-    }),
-    new SolidPolygonLayer({
-      id: "inset-band",
-      data: V.countyParts,
-      visible: !dataView,
-      getPolygon: (d) => d.rings,
-      getFillColor: bandOf,
-      updateTriggers: { getFillColor: trigger },
-      extensions: BAND_EXT,
-      maskId: "inset-band-mask",
-      maskByInstance: false,
-      ...FLAT,
-    }),
-    insetHoverLayer(hoverInset),
-    new PathLayer({
-      id: "inset-map-lines",
-      data: V.arcPaths,
-      getPath: (d) => d.path,
-      getColor: lineColor,
-      getWidth: 0.5,
-      widthUnits: "pixels",
-      capRounded: true,
-      updateTriggers: { getColor: [trigger, dataView] },
-      ...FLAT,
-    }),
-    // On-top lakes, as on the main map: over the fills, page white in data
-    // view. None land in the current boxes, but the stacks stay mirrored.
-    new SolidPolygonLayer({
-      id: "inset-lakes-over",
-      data: V.lakesOver,
-      getPolygon: (d) => d.rings,
-      getFillColor: dataView ? WHITE : LAKE,
-      ...FLAT,
-    }),
-    new PathLayer({
-      id: "inset-lakes-over-edge",
-      data: V.lakeEdgesOver,
-      getPath: (d) => d.path,
-      getColor: COAST,
-      getWidth: 1.1,
-      widthUnits: "pixels",
-      jointRounded: true,
-      capRounded: true,
-      ...FLAT,
-    }),
-    new PathLayer({
-      id: "inset-coast-line",
-      data: V.shorePaths,
-      getPath: (d) => d.path,
-      getColor: COAST,
-      getWidth: 1.1,
-      widthUnits: "pixels",
-      jointRounded: true,
-      capRounded: true,
-      ...FLAT,
-    }),
-    // Data view symbols, the same three marks as the globe stack, mirrored
-    // over insetSymbols so a state's graduated bubble/square/dots shows up
-    // inside its box too, not just on the (often out-of-view) globe copy.
-    new ScatterplotLayer({
-      id: "inset-data-circles",
-      data: symbol?.mark === "circle" ? insetSymbols : EMPTY,
-      getPosition: (d) => [d.x, d.y],
-      getRadius: (d) => d.hw,
-      radiusUnits: "common",
-      stroked: true,
-      getFillColor: symbol?.fill ?? WHITE,
-      getLineColor: symbol?.edge ?? WHITE,
-      getLineWidth: 1,
-      lineWidthUnits: "common",
-      ...FLAT,
-    }),
-    new PolygonLayer({
-      id: "inset-data-squares",
-      data: symbol?.mark === "square" ? insetSymbols : EMPTY,
-      getPolygon: (d) => {
-        const h = d.hw;
-        return [
-          [d.x - h, d.y - h],
-          [d.x + h, d.y - h],
-          [d.x + h, d.y + h],
-          [d.x - h, d.y + h],
-        ];
-      },
-      stroked: true,
-      getFillColor: symbol?.fill ?? WHITE,
-      getLineColor: symbol?.edge ?? WHITE,
-      getLineWidth: 1,
-      lineWidthUnits: "common",
-      ...FLAT,
-    }),
-    new ScatterplotLayer({
-      id: "inset-data-dots",
-      data: symbol?.mark === "dots" ? dotPositions(insetSymbols) : EMPTY,
-      getPosition: (d) => [d.x, d.y],
-      getRadius: DOT_R,
-      radiusUnits: "common",
-      stroked: true,
-      getFillColor: symbol?.fill ?? WHITE,
-      getLineColor: symbol?.edge ?? WHITE,
-      getLineWidth: 0.5,
-      lineWidthUnits: "common",
-      ...FLAT,
-    }),
-    new PathLayer({
-      id: "inset-selected-casing",
-      data: selEdge.inset,
-      visible: !!selected,
-      getPath: (d) => d.path,
-      getColor: WHITE,
-      getWidth: 5.6,
-      widthUnits: "pixels",
-      jointRounded: true,
-      capRounded: true,
-      ...FLAT,
-    }),
-    new PathLayer({
-      id: "inset-selected-outline",
-      data: selEdge.inset,
-      visible: !!selected,
-      getPath: (d) => d.path,
-      getColor: outline,
-      getWidth: 2.6,
-      widthUnits: "pixels",
-      jointRounded: true,
-      capRounded: true,
-      ...FLAT,
-    }),
-  ];
-
-  return { map: mapLayers, hover: hoverLayers, inset: insetLayers };
-}
+// The layer list lives in layers.js; everything above is what it reads.
+const buildLayers = createLayerBuilder({
+  MAIN,
+  RIVER_TIERS,
+  SPHERE_DISC,
+  insetCountyGeo,
+  insetHidden,
+  stateInfo,
+  inDataView,
+  statKeyOf: () => rankStatSel.value,
+  groundColors,
+  stateCentroids,
+  symbolData,
+  computeSymbolData,
+  dotPositions,
+  DOT_R,
+  selectedEdges,
+  hoverSplit,
+  countyHoverLayer,
+  insetHoverLayer,
+});
 
 // All three decks ask for the high-performance GPU explicitly. On a machine
 // with both integrated and discrete graphics the browser is otherwise free
@@ -3463,7 +2715,10 @@ function renderInsetUi() {
     return `<rect x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}"/>`;
   };
   insetMaskHoles.html(hole("ak") + hole("hi"));
-  clipInsetCanvas();
+  // A toggle moves the camera — the cluster re-anchors on the leftmost open
+  // box — so the deck, the SVG transforms and the canvas clip all re-place.
+  insetDeck?.setProps({ viewState: insetViewState() });
+  placeInsetUi();
   for (const key of ["ak", "hi"]) {
     const btn = document.getElementById(`inset-${key}`);
     btn.classList.toggle("active", !insetHidden[key]);
@@ -3617,7 +2872,7 @@ function doRefresh() {
     return;
   }
   fullRefresh = false;
-  const layers = buildLayers();
+  const layers = buildLayers({ V, assign, selected, mapVersion });
   hoverApplied = hoverSplit();
   insetLayerList = layers.inset;
   if (globeMap) {
@@ -3630,7 +2885,16 @@ function doRefresh() {
   }
   insetDeck.setProps({ layers: layers.inset });
   renderDataLabels();
-  stateLabeler.update({ assignVersion, labelsVersion, visible: !inDataView(), assign, stateInfo });
+  // `selected` is for the globe's city labels, which guarantee the selected
+  // state's capital and thin out less inside it; the SVG labelers ignore it.
+  stateLabeler.update({
+    assignVersion,
+    labelsVersion,
+    visible: !inDataView(),
+    assign,
+    stateInfo,
+    selected,
+  });
   for (const key of ["ak", "hi"])
     insetLabelers[key].update({
       assignVersion,
@@ -4209,21 +3473,6 @@ svg.on("pointerleave", () => {
 const el = (id) => document.getElementById(id);
 const rankStatSel = el("rank-stat");
 
-function ranksFor(stats, isForeign = (sid) => stateInfo.get(sid)?.foreign) {
-  const out = {};
-  for (const [key, def] of Object.entries(STAT_DEFS)) {
-    out[key] = [...stats.entries()]
-      // Units still outside the union rank nowhere; once their territory is
-      // painted into a (custom or real) state — or the unit is admitted
-      // whole — it counts.
-      .filter(([sid, s]) => s.n > 0 && !isForeign(sid) && (!def.has || def.has(s)))
-      // Ties (common for electoral votes) fall back to population.
-      .sort((a, b) => def.get(b[1]) - def.get(a[1]) || b[1].pop - a[1].pop)
-      .map(([sid]) => sid);
-  }
-  return out;
-}
-
 function renderElections(tally) {
   const rows = [["pres", tally.ev]];
   for (const [id, t] of rows) {
@@ -4243,8 +3492,7 @@ function renderElections(tally) {
 // filled group by group in reading order. Largest-remainder rounding turns
 // the percentages into whole people that always sum to exactly 100, and the
 // legend quotes those same people counts, so the two never disagree by a dot.
-function renderRaceWaffle(s) {
-  const wrap = el("race-wrap");
+function renderRaceWaffle(s, wrap) {
   if (!s.rT) {
     wrap.hidden = true;
     return;
@@ -4252,7 +3500,7 @@ function renderRaceWaffle(s) {
   wrap.hidden = false;
   const named = RACE_GROUPS.map((rg) => ({ ...rg, pct: (100 * s[rg.key]) / s.rT }));
   const other = Math.max(0, 100 - named.reduce((sum, rg) => sum + rg.pct, 0));
-  const segs = [...named, { label: "Other", color: "#a9a9a9", pct: other }];
+  const segs = [...named, { label: "Other", color: "#c3c9d2", pct: other }];
   for (const g of segs) g.people = Math.floor(g.pct);
   let left = 100 - segs.reduce((sum, g) => sum + g.people, 0);
   for (const g of [...segs].sort((a, b) => (b.pct % 1) - (a.pct % 1))) {
@@ -4260,7 +3508,7 @@ function renderRaceWaffle(s) {
     g.people += 1;
     left -= 1;
   }
-  el("race-grid").innerHTML = segs
+  wrap.querySelector(".race-grid").innerHTML = segs
     .filter((g) => g.people > 0)
     .map((g) =>
       `<i title="${g.label} — ${g.people} of 100 people (${g.pct.toFixed(1)}%)" style="background:${g.color}"></i>`.repeat(
@@ -4268,16 +3516,16 @@ function renderRaceWaffle(s) {
       )
     )
     .join("");
-  el("race-legend").innerHTML = segs
+  wrap.querySelector(".race-legend").innerHTML = segs
     .filter((g) => g.people > 0)
     .map((g) => `<span><i style="background:${g.color}"></i>${g.label} ${g.people}%</span>`)
     .join("");
 }
 
-// One dot per unit — House seat or electoral vote. The grid fits itself to
-// the panel's 104x28 visual band: the largest dot pitch that still fits,
-// growing sideways before shrinking the dots — so a handful of votes gets
-// big, bold dots while California's 54 still fit.
+// One dot per electoral vote. The grid fits itself to the panel's 104x28
+// visual band: the largest dot pitch that still fits, growing sideways
+// before shrinking the dots — so a handful of votes gets big, bold dots
+// while California's 54 still fit.
 function renderStatDots(id, n) {
   const box = el(id);
   const count = n > 0 ? n : 0;
@@ -4295,13 +3543,41 @@ function renderStatDots(id, n) {
   box.replaceChildren(...Array.from({ length: count }, () => document.createElement("i")));
 }
 
+// The stat rows the state card and the whole-USA card share; `p` is the
+// element id prefix ("v" for the state card, "u" for the USA card). The lean
+// gauge pegs at D+30 (left) / R+30 (right); without vote data it hides
+// rather than pointing, misleadingly, at even.
+function renderStatRows(p, s) {
+  el(`${p}-pop`).textContent = fmtPop(s.pop);
+  el(`${p}-gdp`).textContent = fmtBigMoney(s.gdp);
+  el(`${p}-gdppc`).textContent = fmtMoneyK(s.gdppc);
+  el(`${p}-mhi`).textContent = s.incPop ? fmtMoney(s.mhi) : "—";
+  el(`${p}-bach`).textContent = fmtPct(s.bach);
+  el(`${p}-life`).textContent = s.lifePop ? fmtYears(s.life) : "—";
+  el(`${p}-margin`).textContent = s.tot ? fmtMargin(s.margin) : "—";
+  el(`${p}-margin`).className = s.tot && Math.abs(s.margin) >= 0.05 ? (s.margin > 0 ? "d" : "r") : "";
+  el(`${p}-ev`).textContent = s.ev || "—";
+  el(`${p}-n`).textContent = s.n.toLocaleString("en-US");
+  el(`${p}-dial-margin`).style.visibility = s.n > 0 && s.tot > 0 ? "" : "hidden";
+  const lean = Math.max(-30, Math.min(30, s.margin || 0));
+  el(`${p}-dial-needle`).style.left = `calc(${(50 - (lean * 50) / 30).toFixed(1)}% - 1px)`;
+}
+
 function renderSidebar() {
   const stats = getStats();
-  const ranks = ranksFor(stats);
+  const ranks = ranksFor(stats, isForeignState);
 
   renderElections(computeElections(stats));
 
-  // selected-state card
+  // The statusbar's tally: every unit holding territory (foreign ones too),
+  // and every paintable piece on the map — carved halves each count.
+  const unitCount = [...stats.values()].filter((s) => s.n > 0).length;
+  el("status-units").textContent =
+    `${unitCount} units · ${assign.size.toLocaleString("en-US")} counties`;
+
+  // Selected-state card, or the whole union summed as one unit when nothing
+  // is selected.
+  el("statebox-title").textContent = selected ? "Selected State" : "United States";
   el("empty-card").hidden = !!selected;
   el("state-card").hidden = !selected;
   if (selected) {
@@ -4316,44 +3592,26 @@ function renderSidebar() {
     dot.disabled = !!info.foreign;
     dot.title = info.foreign ? "" : "Change color";
     if (document.activeElement !== el("state-name")) el("state-name").value = info.name;
-    // A unit outside the union offers admission as its headline action.
-    el("add-state").hidden = !info.foreign;
-    el("v-pop").textContent = fmtPop(s.pop);
-    el("v-gdp").textContent = fmtBigMoney(s.gdp);
-    el("v-gdppc").textContent = fmtMoneyK(s.gdppc);
-    el("v-mhi").textContent = s.incPop ? fmtMoney(s.mhi) : "—";
-    el("v-bach").textContent = fmtPct(s.bach);
-    el("v-life").textContent = s.lifePop ? fmtYears(s.life) : "—";
-    el("v-margin").textContent = s.tot ? fmtMargin(s.margin) : "—";
-    el("v-seats").textContent = s.seats || "—";
-    el("v-ev").textContent = s.ev || "—";
-    el("v-n").textContent = s.n;
+    const flagBtn = el("state-flag");
+    flagBtn.innerHTML = flagIconHtml(info.country);
+    flagBtn.title = (info.country ? countryName(info.country) : "Independent") + " — change country";
+    renderStatRows("v", s);
     for (const key of ["pop", "gdp", "gdppc", "mhi", "bach", "life", "margin", "ev"]) {
       const i = ranks[key].indexOf(selected);
       el("r-" + key).textContent = i === -1 ? "—" : `#${i + 1} of ${ranks[key].length}`;
     }
-    // Bars are scaled against the current leader, like the rankings list;
-    // a state missing a stat's inputs shows an empty track.
-    for (const key of ["pop", "gdp", "gdppc", "mhi", "bach", "life"]) {
-      const def = STAT_DEFS[key];
-      const top = ranks[key][0];
-      const ok = top && s.n > 0 && (!def.has || def.has(s));
-      el("b-" + key).style.width = ok
-        ? (100 * def.get(s)) / Math.max(1e-9, def.get(stats.get(top))) + "%"
-        : "0%";
-    }
-    // The lean dial pegs at D+30 / R+30; without vote data it hides rather
-    // than pointing, misleadingly, at even.
-    const hasMargin = s.n > 0 && s.tot > 0;
-    el("dial-margin").style.visibility = hasMargin ? "" : "hidden";
-    const lean = Math.max(-30, Math.min(30, s.margin || 0));
-    el("dial-needle").setAttribute("transform", `rotate(${(-lean * 90) / 30} 26 27)`);
-    renderStatDots("d-seats", s.seats);
     renderStatDots("d-ev", s.ev);
-    renderRaceWaffle(s);
+    renderRaceWaffle(s, el("state-card").querySelector(".race-wrap"));
+  } else {
+    const usa = sumStats(stats, isForeignState);
+    renderStatRows("u", usa);
+    renderRaceWaffle(usa, el("empty-card").querySelector(".race-wrap"));
   }
 
-  // rankings list with mini bars scaled to the leader
+  // Rankings listview, with mini bars scaled to the leader. The bars live
+  // here and not in the state card: stacked against every other state's
+  // they read as small multiples, which is the one place a scaled bar
+  // means anything.
   const key = rankStatSel.value;
   const def = STAT_DEFS[key];
   const sids = ranks[key];
@@ -4542,10 +3800,11 @@ function renderColorMenu() {
     ...[...BASE_COLORS, ...BACKUP_COLORS].map((c) => {
       const b = document.createElement("button");
       b.className = "swatch";
-      b.style.background = c;
-      if (c === info.color) b.classList.add("current");
+      b.style.background = c.light;
+      b.title = c.name;
+      if (c.light === info.color) b.classList.add("current");
       b.addEventListener("click", () => {
-        info.color = c;
+        info.color = c.light;
         colorMenu.hidden = true;
         scheduleRefresh();
       });
@@ -4562,6 +3821,59 @@ el("state-dot").addEventListener("click", () => {
 
 document.addEventListener("pointerdown", (ev) => {
   if (!colorMenu.hidden && !ev.target.closest(".dot-wrap")) colorMenu.hidden = true;
+});
+
+// Country picker: the flag by the name opens a searchable list of every
+// country the app knows, plus "Independent" — the one control for a state's
+// political status, in every direction (joining the US, joining anywhere
+// else, or striking out on its own). The three North American countries a
+// state realistically joins are pinned to the top in that order; the rest
+// sort alphabetically by their displayed name, not their code.
+const PINNED_COUNTRIES = ["US", "CA", "MX"];
+const flagMenu = el("country-menu");
+const flagSearch = el("country-search");
+const flagList = el("country-list");
+const countryOptions = [
+  ...PINNED_COUNTRIES,
+  ...COUNTRY_CODES.filter((c) => !PINNED_COUNTRIES.includes(c)).sort((a, b) =>
+    countryName(a).localeCompare(countryName(b))
+  ),
+].map((code) => ({ code, name: countryName(code) }));
+
+function renderCountryMenu(query) {
+  const q = query.trim().toLowerCase();
+  const rows = [];
+  if (!q || "independent".includes(q)) rows.push({ code: null, name: "Independent" });
+  for (const c of countryOptions) if (!q || c.name.toLowerCase().includes(q)) rows.push(c);
+  flagList.innerHTML = rows.length
+    ? rows
+        .map(
+          (c) =>
+            `<div class="country-item" data-code="${c.code ?? ""}">${flagIconHtml(c.code)}${c.name}</div>`
+        )
+        .join("")
+    : `<div class="preset-none">No matching countries</div>`;
+}
+
+el("state-flag").addEventListener("click", () => {
+  if (!selected) return;
+  const opening = flagMenu.hidden;
+  flagMenu.hidden = !flagMenu.hidden;
+  if (opening) {
+    flagSearch.value = "";
+    renderCountryMenu("");
+    flagSearch.focus();
+  }
+});
+flagSearch.addEventListener("input", () => renderCountryMenu(flagSearch.value));
+flagList.addEventListener("pointerdown", (ev) => {
+  const item = ev.target.closest(".country-item");
+  if (!item || !selected) return;
+  setCountry(selected, item.dataset.code || null);
+  flagMenu.hidden = true;
+});
+document.addEventListener("pointerdown", (ev) => {
+  if (!flagMenu.hidden && !ev.target.closest(".flag-wrap")) flagMenu.hidden = true;
 });
 
 // The selected state as JSON on the clipboard: the state's name (plus its
@@ -4603,22 +3915,6 @@ el("copy-json").addEventListener("click", async () => {
     btn.textContent = "Copy failed";
   }
   setTimeout(() => (btn.textContent = "Copy JSON"), 1200);
-});
-
-// "Add as US state": admit the selected foreign unit into the union. It
-// keeps its id, name and territory; dropping the foreign flag is what pulls
-// it into rankings, apportionment and the election replay (where its
-// electoral votes sit in the no-data middle — it cast no 2024 vote), and a
-// real state color replaces the shared tan.
-el("add-state").addEventListener("click", () => {
-  const info = selected && stateInfo.get(selected);
-  if (!info?.foreign) return;
-  info.foreign = false;
-  const fipsList = [...assign].filter(([, sid]) => sid === selected).map(([f]) => f);
-  info.color = pickStateColor(borderingStates(fipsList).filter((n) => n !== selected));
-  // Dropping the foreign flag puts the unit's name on the map.
-  labelsVersion++;
-  scheduleRefresh();
 });
 
 window.__select = (sid) => select(sid);
@@ -4718,10 +4014,14 @@ el("reset").addEventListener("click", () => {
   }
   assign = new Map(origAssign);
   for (const [sid, info] of stateInfo) if (info.custom) stateInfo.delete(sid);
-  // Admitted units step back out of the union, and every color — including
-  // hand-picked ones — returns to the original map's.
-  for (const id of FOREIGN) stateInfo.get(id).foreign = true;
-  for (const [sid, info] of stateInfo) info.color = origColors.get(sid);
+  // Every unit's country — an admitted foreign unit, or a real state the
+  // flag menu sent abroad — returns to how the map loaded, and every color,
+  // including hand-picked ones, follows it back.
+  for (const [sid, info] of stateInfo) {
+    info.country = origCountries.get(sid);
+    info.foreign = info.country !== "US";
+    info.color = origColors.get(sid);
+  }
   customCount = 0;
   selected = null;
   touchTerritory();
@@ -4734,6 +4034,55 @@ el("reset").addEventListener("click", () => {
     setRotation(HOME_ROTATION);
   }
   svg.call(zoom.transform, HOME_TRANSFORM);
+});
+
+// Recolor re-runs the load-time rule — Welsh–Powell greedy, bordering states
+// never matching — over the borders as they stand now, from a fresh random
+// seed, so each press deals a different arrangement of the same palette.
+el("recolor").addEventListener("click", () => {
+  // Adjacency from the live assignment, not the as-loaded stateNeighbors:
+  // painting and carving have moved borders, and the no-match guarantee is
+  // about the borders on screen.
+  const nbrs = new Map();
+  for (const [fips, sid] of assign) {
+    for (const n of countyAdj.get(fips) ?? []) {
+      const other = assign.get(n);
+      if (!other || other === sid) continue;
+      if (!nbrs.has(sid)) nbrs.set(sid, new Set());
+      nbrs.get(sid).add(other);
+    }
+  }
+  // The seed is a random palette rotation plus a random tie order within a
+  // degree class — the rotation alone only has six settings, and the load
+  // coloring's alphabetical tie-break would pin most of the map in place.
+  const seed = Math.floor(Math.random() * BASE_COLORS.length);
+  const jitter = new Map(
+    [...stateInfo].filter(([, info]) => !info.foreign).map(([sid]) => [sid, Math.random()])
+  );
+  const order = [...jitter.keys()].sort(
+    (a, b) => (nbrs.get(b)?.size ?? 0) - (nbrs.get(a)?.size ?? 0) || jitter.get(a) - jitter.get(b)
+  );
+  // Colors assigned this run; a foreign neighbor never appears here, so its
+  // shared tan doesn't count as a taken slot, same as everywhere else.
+  const colored = new Map();
+  order.forEach((sid, i) => {
+    const taken = new Map();
+    for (const n of nbrs.get(sid) ?? []) {
+      const c = colored.get(n);
+      if (c) taken.set(c, (taken.get(c) ?? 0) + 1);
+    }
+    const start = (seed + i) % BASE_COLORS.length;
+    const rotated = BASE_COLORS.slice(start)
+      .concat(BASE_COLORS.slice(0, start))
+      .map((c) => c.light);
+    const color =
+      rotated.find((c) => !taken.has(c)) ??
+      BACKUP_COLORS.find((c) => !taken.has(c.light))?.light ??
+      rotated.reduce((best, c) => (taken.get(c) < taken.get(best) ? c : best));
+    colored.set(sid, color);
+    stateInfo.get(sid).color = color;
+  });
+  scheduleRefresh();
 });
 
 el("reset-view").addEventListener("click", () => {
@@ -4760,7 +4109,8 @@ function renderPresetMenu(query) {
       p.desc.toLowerCase().includes(q)
   );
   presetMenu.innerHTML = hits.length
-    ? hits
+    ? `<div class="rgroup">Presets</div>` +
+      hits
         .map(
           (p) => `<div class="preset-item" data-id="${p.id}">
             <b>${p.label ?? p.name}</b><small>${p.desc}</small>
@@ -5812,8 +5162,30 @@ function renderSources() {
     "Canada: 2021 Census Profile (visible minority & Indigenous identity, mapped onto the US categories)",
   ];
   list.push("Non-US pop, GDP, education & income: hand-compiled estimates");
-  el("sources").textContent = [...list, "Shorelines & lakes: Natural Earth"].join(" · ");
+  el("sources").innerHTML = [...list, "Shorelines & lakes: Natural Earth"]
+    .map((line) => line.replace(/&(?!amp;)/g, "&amp;"))
+    .join("<br />");
 }
+
+// The sources live in a dialog behind the rankings box's "Sources" link.
+el("src-link").addEventListener("click", (ev) => {
+  ev.preventDefault();
+  el("srcdlg").hidden = false;
+});
+el("src-ok").addEventListener("click", () => (el("srcdlg").hidden = true));
+el("src-x").addEventListener("click", () => (el("srcdlg").hidden = true));
+
+// The browser's own print dialog; a print stylesheet strips the chrome so
+// the page comes out as the map plus the sidebar's numbers.
+el("print").addEventListener("click", () => window.print());
+
+// The status bar explains whatever the pointer rests on, then falls back to
+// Ready rather than blanking.
+const statusMsg = el("status-msg");
+document.addEventListener("mouseover", (ev) => {
+  const hinted = ev.target.closest?.("[data-hint]");
+  statusMsg.textContent = hinted ? hinted.dataset.hint : "Ready";
+});
 
 // The election replay appears while a stat it explains is on screen: the D–R
 // margin it retells, or the electoral votes it tallies.

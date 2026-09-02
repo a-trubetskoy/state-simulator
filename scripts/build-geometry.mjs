@@ -115,6 +115,97 @@ const piecesFor = (a, b) => {
   return Math.ceil(omega / MAX_EDGE_RAD);
 };
 
+// ------------------------------------------------------------- the wide views
+//
+// A second, thinned copy of the county boundary, for the zooms where the full
+// one paints as a band instead of a line.
+//
+// The cause is the source's own resolution. The Census outline is generalized
+// at 1.6 km, and a pixel is 4.7 km at the home view, so a border that follows a
+// river packs several vertices — and several changes of direction — inside one
+// pixel. Every segment is a separate blended capsule (LINE_FS), so those
+// capsules stack. The hairline is white at alpha 0.5 and its centre saturates
+// to near-solid on any border; what the stacking adds is WIDTH, by carrying
+// that near-solid core out across every pixel the zigzag reaches. A survey-line
+// border has one segment per pixel and stays a hairline, so the two kinds of
+// border stop reading as the same line. Composited at the home view, the lower
+// Mississippi and Ohio county borders lay down about a fifth more ink per unit
+// length than the Colorado and Wyoming ones do.
+//
+// Douglas-Peucker rather than Visvalingam, because the tolerance is then a
+// distance and can be reasoned about in pixels: no point of the thinned line
+// sits more than COARSE_TOLERANCE_KM from the line it replaces, which is what
+// bounds how far the border moves when the renderer swaps tiers.
+//
+// Run over the ARCS, which is what makes this safe. An arc is shared by the two
+// counties either side of it, so thinning it once moves both of their outlines
+// the same way and no gap can open between them. Doing it per county — or per
+// feature, after the topology is resolved — would thin the same boundary twice
+// and leave slivers along every shared edge.
+//
+// 2 km is picked against the crossover in layers.js: at COARSE_ZOOM every
+// dropped point is within 0.85 px of where it was (median 0.32 px), so the swap
+// is under the width of the line it moves and does not read as a jump. A larger
+// tolerance thins more and pops more; the two numbers move together and are
+// meant to be tuned together.
+const COARSE_TOLERANCE_KM = 2;
+
+// Perpendicular distance from p to the segment ab, all three in chord space —
+// so the tolerance stays a distance on the ground, where degrees would mean
+// 2 km along the Rio Grande and 1.2 km along the Canadian border.
+//
+// To the SEGMENT and not the infinite line: an arc that doubles back would
+// otherwise be measured against ground the chord never covers.
+const distToSegment = (p, a, b) => {
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
+  const dz = b[2] - a[2];
+  const len2 = dx * dx + dy * dy + dz * dz;
+  const px = p[0] - a[0];
+  const py = p[1] - a[1];
+  const pz = p[2] - a[2];
+  let t = len2 > 0 ? (px * dx + py * dy + pz * dz) / len2 : 0;
+  t = t < 0 ? 0 : t > 1 ? 1 : t;
+  return Math.hypot(px - dx * t, py - dy * t, pz - dz * t);
+};
+
+// Which points survive. The mask rather than the points, because the check at
+// the bottom needs to walk the dropped ones against the chords that replaced
+// them, and rediscovering them by searching the output would be both slow and
+// a second copy of this decision.
+function simplifyMask(xyz, tolKm) {
+  const tol = tolKm / EARTH_KM;
+  const keep = new Uint8Array(xyz.length);
+  keep[0] = keep[xyz.length - 1] = 1; // the endpoints are where arcs meet
+  const stack = [[0, xyz.length - 1]];
+  while (stack.length) {
+    const [i, j] = stack.pop();
+    if (j - i < 2) continue;
+    let worst = -1;
+    let at = -1;
+    for (let k = i + 1; k < j; k++) {
+      const d = distToSegment(xyz[k], xyz[i], xyz[j]);
+      if (d > worst) {
+        worst = d;
+        at = k;
+      }
+    }
+    if (worst > tol) {
+      keep[at] = 1;
+      stack.push([i, at], [at, j]);
+    }
+  }
+  return keep;
+}
+
+const arcXyz = (lonLat) => lonLat.map(([lon, lat]) => toXyz(lon, lat));
+
+function simplifyArc(lonLat, tolKm) {
+  if (lonLat.length < 3) return lonLat;
+  const keep = simplifyMask(arcXyz(lonLat), tolKm);
+  return lonLat.filter((_, i) => keep[i]);
+}
+
 const stats = { subdividedEdges: 0, insertedPoints: 0, emptySegments: 0, emptyRuns: 0 };
 
 // Rounding the overlay files to four decimals collapses the odd short step, and
@@ -903,19 +994,57 @@ for (const cls of ["coast", "lakeshore", "border"]) {
 // share no arc, so the build ships the Census side annotated with the county
 // and the foreign unit that flank it; with those as left and right, a seam
 // segment renders and filters exactly like a shared-arc state border.
+//
+// Sides are resolved once, here, and the runs kept: the coarse tier below emits
+// the same seams thinned, and ownerOnLeft both probes the source line and keeps
+// the counters the orientation report reads, so calling it twice would answer
+// off the thinned line and double every count.
+const seamRuns = [];
+for (const s of overlays.seams ?? []) {
+  if (!hasLength(s.line)) {
+    stats.emptyRuns++;
+    continue;
+  }
+  const county = unitIndex.get(s.c) ?? UNIT_OUTSIDE;
+  const foreign = unitIndex.get(s.f) ?? UNIT_OUTSIDE;
+  const left = ownerOnLeft(s.line, s.c);
+  seamRuns.push({
+    line: s.line,
+    left: left ? county : foreign,
+    right: left ? foreign : county,
+  });
+}
 {
   const first = beginLines();
-  for (const s of overlays.seams ?? []) {
-    if (!hasLength(s.line)) {
-      stats.emptyRuns++;
-      continue;
-    }
-    const county = unitIndex.get(s.c) ?? UNIT_OUTSIDE;
-    const foreign = unitIndex.get(s.f) ?? UNIT_OUTSIDE;
-    const left = ownerOnLeft(s.line, s.c);
-    addPolyline(s.line, left ? county : foreign, left ? foreign : county);
-  }
+  for (const r of seamRuns) addPolyline(r.line, r.left, r.right);
   endLines("seams", first, { unitBoundary: true });
+}
+
+// The same two groups again, thinned — see COARSE_TOLERANCE_KM above. They are
+// the geometry the county hairline draws below COARSE_ZOOM; everything else
+// that runs along a county boundary keeps the full detail, because the band is
+// 10 px across and the selection outline 5.6, and at those widths a border's
+// own roughness is well inside the stroke.
+//
+// Both tiers name the same units on the same sides, so a carve re-owns them
+// together: map.js walks every compiled segment that names a retired county,
+// which is the whole buffer rather than one group.
+{
+  const first = beginLines();
+  for (let i = 0; i < arcs.length; i++) {
+    if (!arcUsers[i]) continue;
+    let left = arcLeft[i];
+    let right = arcRight[i];
+    if (left === UNIT_OUTSIDE) left = right;
+    else if (right === UNIT_OUTSIDE) right = left;
+    addPolyline(simplifyArc(arcs[i], COARSE_TOLERANCE_KM), left, right);
+  }
+  endLines("countyArcsCoarse", first, { unitBoundary: true });
+}
+{
+  const first = beginLines();
+  for (const r of seamRuns) addPolyline(simplifyArc(r.line, COARSE_TOLERANCE_KM), r.left, r.right);
+  endLines("seamsCoarse", first, { unitBoundary: true });
 }
 
 if (runMatch.unresolved) {
@@ -1083,6 +1212,51 @@ function rotationMatrix([lambda, phi, gamma = 0]) {
       `${km(worstBacking).toFixed(0)} km`
   );
 }
+{
+  // The coarse tier rests on one property: it thins the SHARED arcs and keeps
+  // their ends, so the two counties either side of a boundary move together and
+  // no sliver can open between them. Asserted here rather than trusted, because
+  // a dropped endpoint would show as a hairline pulling off the fill it divides
+  // — at the wide zooms only, and on whichever county happened to own that arc.
+  //
+  // The deviation is the other half: it is what layers.js converts into pixels
+  // to argue the swap at COARSE_ZOOM is smaller than the line that moves, so a
+  // tolerance that did not hold would quietly invalidate that number.
+  let worstKm = 0;
+  let kept = 0;
+  let total = 0;
+  for (let i = 0; i < arcs.length; i++) {
+    if (!arcUsers[i] || arcs[i].length < 3) continue;
+    const src = arcs[i];
+    const xyz = arcXyz(src);
+    const keep = simplifyMask(xyz, COARSE_TOLERANCE_KM);
+    total += src.length;
+    if (!keep[0] || !keep[src.length - 1]) {
+      throw new Error(`the coarse tier dropped an end of arc ${i}, which two counties share`);
+    }
+    // Every dropped point against the chord that replaced it.
+    let from = 0;
+    for (let k = 1; k < src.length; k++) {
+      if (!keep[k]) continue;
+      for (let m = from + 1; m < k; m++) {
+        worstKm = Math.max(worstKm, distToSegment(xyz[m], xyz[from], xyz[k]) * EARTH_KM);
+      }
+      from = k;
+      kept++;
+    }
+    kept++; // the first point, which the loop above starts past
+  }
+  if (worstKm > COARSE_TOLERANCE_KM * 1.001) {
+    throw new Error(
+      `the coarse tier strays ${worstKm.toFixed(2)} km, over its ${COARSE_TOLERANCE_KM} km tolerance`
+    );
+  }
+  console.log(
+    `coarse tier keeps every shared arc end, ${kept.toLocaleString()} of ` +
+      `${total.toLocaleString()} points, straying at most ${worstKm.toFixed(2)} km ` +
+      `(tolerance ${COARSE_TOLERANCE_KM} km)`
+  );
+}
 
 // -------------------------------------------------------------------- write
 
@@ -1163,6 +1337,8 @@ const manifest = {
     "border",
     "countyArcs",
     "seams",
+    "countyArcsCoarse",
+    "seamsCoarse",
   ],
   lines: lineGroups,
   units: unitIds,
@@ -1208,6 +1384,18 @@ for (const name of manifest.fillOrder) {
 console.log(`lines   ${lineCount().toLocaleString()} segments`);
 for (const name of manifest.lineOrder) {
   console.log(`  ${name.padEnd(16)} ${String(lineGroups[name].count).padStart(8)} segments`);
+}
+{
+  // What the wide-view tier costs and what it buys, side by side, so a change
+  // to COARSE_TOLERANCE_KM shows its effect on the next build.
+  const full = lineGroups.countyArcs.count + lineGroups.seams.count;
+  const coarse = lineGroups.countyArcsCoarse.count + lineGroups.seamsCoarse.count;
+  const bytes = coarse * 28; // start + end + left + right
+  console.log(
+    `\ncoarse tier at ${COARSE_TOLERANCE_KM} km: ${coarse.toLocaleString()} segments against ` +
+      `${full.toLocaleString()} full-detail (${(100 - (coarse / full) * 100).toFixed(0)}% fewer), ` +
+      `costing ${mb(bytes)}`
+  );
 }
 console.log(
   `\n${stats.subdividedEdges.toLocaleString()} source edges subdivided ` +

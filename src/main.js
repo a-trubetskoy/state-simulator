@@ -4121,13 +4121,13 @@ function renderPresetMenu(query) {
   presetMenu.hidden = false;
 }
 
-// A preset whose sole target `states` entry still carries that exact name
-// merges straight into that existing state (e.g. DC back into Maryland)
-// instead of spinning up a same-named duplicate and orphaning the original.
+// A preset whose target `states` include one still carrying that exact name
+// merges straight into that existing state (e.g. DC back into Maryland, or
+// Maine back into Massachusetts) instead of spinning up a same-named
+// duplicate and orphaning the original — which would also cost the state its
+// rank-change delta, since a fresh id has no rank on the original map.
 function mergeTarget(preset) {
-  if (preset.states?.length !== 1) return null;
-  const sid = preset.states[0];
-  return stateInfo.get(sid)?.name === preset.name ? sid : null;
+  return (preset.states ?? []).find((sid) => stateInfo.get(sid)?.name === preset.name) ?? null;
 }
 
 // Presets speak in county FIPS; a carved county answers to its pieces.
